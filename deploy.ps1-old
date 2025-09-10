@@ -1,0 +1,2279 @@
+# Interactive BICEP Template Deployment Script
+param(
+    [string]$ResourceGroup = "MyResourceGroup"
+)
+
+# Deployment settings and log files
+$SettingsFile = ".deployment-settings.json"
+$ChromeExecutablePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+$ChromeUserDataPath = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+# Ensure logs directory exists
+if (-not (Test-Path "logs")) {
+    New-Item -ItemType Directory -Path "logs" -Force | Out-Null
+}
+
+$LogFile = "logs\deployment-$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
+$LatestLogFile = "logs\deployment-latest.log"
+
+# Logging functions
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO",
+        [string]$Color = "White"
+    )
+    
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$Level] $Message"
+    
+    # Write to console with color
+    Write-Host $Message -ForegroundColor $Color
+    
+    # Write to log files
+    Add-Content -Path $LogFile -Value $logEntry -Encoding UTF8
+    Add-Content -Path $LatestLogFile -Value $logEntry -Encoding UTF8
+}
+
+function Start-DeploymentLog {
+    # Initialize log files
+    $logHeader = @"
+=== BICEP DEPLOYMENT LOG ===
+Started: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+Resource Group: $(Get-EffectiveResourceGroup)
+Script Version: 2.0 (with logging)
+============================
+
+"@
+    
+    $logHeader | Set-Content -Path $LogFile -Encoding UTF8
+    $logHeader | Set-Content -Path $LatestLogFile -Encoding UTF8
+    
+    Write-Log "Deployment logging started" "START" "Green"
+    Write-Log "Log file: $LogFile" "INFO" "Gray"
+}
+
+# Auto-discover parameter files
+function Get-ParameterFiles {
+    # Initialize parameters.local.json if it doesn't exist
+    $localParamFile = "parameters.local.json"
+    if (-not (Test-Path $localParamFile)) {
+        Write-Log "Creating default parameters.local.json file" "INFO" "Yellow"
+        Initialize-LocalParameterFile
+    }
+    
+    $paramFiles = Get-ChildItem -Path "." -Filter "parameters.*.json" | Sort-Object Name
+    return $paramFiles
+}
+
+# Initialize local parameter file with default template
+function Initialize-LocalParameterFile {
+    $defaultParameters = @{
+        '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+        contentVersion = '1.0.0.0'
+        parameters = @{
+            environment = @{
+                value = 'test'
+            }
+            logicAppState = @{
+                value = 'Disabled'
+            }
+            workflowNames = @{
+                value = @{}
+            }
+            dataverse = @{
+                value = @{
+                    uri = '%%URL for Dataverse%%'
+                    clientSecret = '%%Secret for Dataverse%%'
+                    clientId = '%%ClientId for Dataverse%%'
+                }
+            }
+            businessCentral = @{
+                value = @{
+                    environmentName = '%%BC EnvironmentName%%'
+                    countries = @(
+                        @{
+                            name = 'norway'
+                            companyId = '%%CompanyId%%'
+                        },
+                        @{
+                            name = 'sweden'
+                            companyId = '%%CompanyId%%'
+                        }
+                    )
+                    apiCategories = @{}
+                }
+            }
+        }
+    }
+    
+    try {
+        $defaultParameters | ConvertTo-Json -Depth 10 | Set-Content "parameters.local.json" -Encoding UTF8
+        Write-Log "Created parameters.local.json with default template" "SUCCESS" "Green"
+        Write-Log "Please update the placeholder values (%%...%%) in parameters.local.json" "INFO" "Cyan"
+    }
+    catch {
+        Write-Log "Failed to create parameters.local.json: $($_.Exception.Message)" "ERROR" "Red"
+    }
+}
+
+# Get available parameter files
+$ParameterFiles = Get-ParameterFiles
+$SelectedParameterFile = $null
+
+# Global variables
+$SkipUnchangedGlobal = "prompt"
+$LastDeploymentResult = $null  # Track last deployment result for menu display
+
+# Progress spinner function
+function Show-ProgressSpinner {
+    param(
+        [string]$Message,
+        [scriptblock]$ScriptBlock,
+        [string]$CompletedMessage,
+        [array]$ArgumentList = @()
+    )
+    
+    $spinnerChars = @('|', '/', '-', '\')
+    $spinnerIndex = 0
+    $startTime = Get-Date
+    
+    # Start the background job with arguments
+    if ($ArgumentList.Count -gt 0) {
+        $job = Start-Job -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+    } else {
+        $job = Start-Job -ScriptBlock $ScriptBlock
+    }
+    
+    # Show spinner while job is running
+    while ($job.State -eq 'Running') {
+        $elapsed = [math]::Round(((Get-Date) - $startTime).TotalSeconds)
+        $spinner = $spinnerChars[$spinnerIndex % $spinnerChars.Length]
+        
+        # Clear the current line and write the spinner with timer
+        Write-Host "`r$Message $spinner ($elapsed)s" -NoNewline -ForegroundColor Cyan
+        
+        Start-Sleep -Milliseconds 200
+        $spinnerIndex++
+    }
+    
+    # Clear the spinner line
+    Write-Host "`r" -NoNewline
+    Write-Host (" " * ($Message.Length + 20)) -NoNewline
+    Write-Host "`r" -NoNewline
+    
+    # Wait for job completion and get results
+    $result = Receive-Job -Job $job -Wait
+    Remove-Job -Job $job
+    
+    # Show completion message
+    $finalElapsed = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 2)
+    if ($CompletedMessage) {
+        Write-Host "$CompletedMessage ($finalElapsed)s)" -ForegroundColor Green
+    }
+    
+    return $result
+}
+
+# Tenant management functions
+function Get-DesiredTenant {
+    $settings = Get-DeploymentSettings
+    if ($settings.Configuration -and $settings.Configuration.DesiredTenant) {
+        return $settings.Configuration.DesiredTenant
+    }
+    return $null
+}
+
+function Set-DesiredTenant {
+    param([string]$TenantId)
+    $settings = Get-DeploymentSettings
+    
+    # Convert to hashtable for modification
+    $settingsHash = @{
+        SelectedParameterFile = $settings.SelectedParameterFile
+        LastUpdated = $settings.LastUpdated
+        FileOrder = $settings.FileOrder
+        Configuration = if ($settings.Configuration) { 
+            @{
+                DesiredTenant = $settings.Configuration.DesiredTenant
+                ChromeProfile = $settings.Configuration.ChromeProfile
+                Subscription = $settings.Configuration.Subscription
+                ResourceGroup = $settings.Configuration.ResourceGroup
+            }
+        } else { 
+            @{} 
+        }
+    }
+    
+    $settingsHash.Configuration.DesiredTenant = $TenantId
+    Set-DeploymentSettings $settingsHash
+    Write-Log "Desired tenant set to: $TenantId" "CONFIG" "Green"
+}
+
+function Get-ChromeProfile {
+    $settings = Get-DeploymentSettings
+    if ($settings.Configuration -and $settings.Configuration.ChromeProfile) {
+        return $settings.Configuration.ChromeProfile
+    }
+    return "Default"
+}
+
+function Set-ChromeProfile {
+    param([string]$ProfileName)
+    $settings = Get-DeploymentSettings
+    
+    # Convert to hashtable for modification
+    $settingsHash = @{
+        SelectedParameterFile = $settings.SelectedParameterFile
+        LastUpdated = $settings.LastUpdated
+        FileOrder = $settings.FileOrder
+        Configuration = if ($settings.Configuration) { 
+            @{
+                DesiredTenant = $settings.Configuration.DesiredTenant
+                ChromeProfile = $settings.Configuration.ChromeProfile
+                Subscription = $settings.Configuration.Subscription
+                ResourceGroup = $settings.Configuration.ResourceGroup
+            }
+        } else { 
+            @{} 
+        }
+    }
+    
+    $settingsHash.Configuration.ChromeProfile = $ProfileName
+    Set-DeploymentSettings $settingsHash
+    Write-Log "Chrome profile set to: $ProfileName" "CONFIG" "Green"
+}
+
+function Get-CurrentAzureTenant {
+    try {
+        $accountInfo = az account show 2>$null | ConvertFrom-Json
+        if ($accountInfo -and $accountInfo.tenantId) {
+            return $accountInfo.tenantId
+        }
+    }
+    catch {
+        # Ignore errors if not logged in
+    }
+    return $null
+}
+
+function Get-CurrentAzureTenantInfo {
+    try {
+        $accountInfo = az account show 2>$null | ConvertFrom-Json
+        if ($accountInfo -and $accountInfo.tenantId) {
+            # Try to get tenant details with domain
+            $tenantInfo = az account tenant show --tenant $accountInfo.tenantId 2>$null | ConvertFrom-Json
+            if ($tenantInfo) {
+                return @{
+                    TenantId = $accountInfo.tenantId
+                    Domain = if ($tenantInfo.defaultDomain) { $tenantInfo.defaultDomain } else { "Unknown domain" }
+                    DisplayName = if ($tenantInfo.displayName) { $tenantInfo.displayName } else { "Unknown tenant" }
+                }
+            } else {
+                # Fallback if tenant details unavailable
+                return @{
+                    TenantId = $accountInfo.tenantId
+                    Domain = "Domain unavailable"
+                    DisplayName = "Tenant details unavailable"
+                }
+            }
+        }
+    }
+    catch {
+        # Ignore errors if not logged in
+    }
+    return $null
+}
+
+function Test-AzureLogin {
+    $currentTenant = Get-CurrentAzureTenant
+    $desiredTenant = Get-DesiredTenant
+    
+    if (-not $currentTenant) {
+        return @{
+            IsLoggedIn = $false
+            CurrentTenant = $null
+            DesiredTenant = $desiredTenant
+            NeedsLogin = $true
+            Message = "Not logged into Azure"
+        }
+    }
+    
+    if ($desiredTenant -and $currentTenant -ne $desiredTenant) {
+        return @{
+            IsLoggedIn = $true
+            CurrentTenant = $currentTenant
+            DesiredTenant = $desiredTenant
+            NeedsLogin = $true
+            Message = "Logged into wrong tenant"
+        }
+    }
+    
+    return @{
+        IsLoggedIn = $true
+        CurrentTenant = $currentTenant
+        DesiredTenant = $desiredTenant
+        NeedsLogin = $false
+        Message = "Logged into correct tenant"
+    }
+}
+
+function Get-Subscription {
+    $settings = Get-DeploymentSettings
+    if ($settings.Configuration -and $settings.Configuration.Subscription) {
+        return $settings.Configuration.Subscription
+    }
+    return $null
+}
+
+function Set-Subscription {
+    param([string]$SubscriptionId)
+    $settings = Get-DeploymentSettings
+    
+    # Convert to hashtable for modification
+    $settingsHash = @{
+        SelectedParameterFile = $settings.SelectedParameterFile
+        LastUpdated = $settings.LastUpdated
+        FileOrder = $settings.FileOrder
+        Configuration = if ($settings.Configuration) { 
+            @{
+                DesiredTenant = $settings.Configuration.DesiredTenant
+                ChromeProfile = $settings.Configuration.ChromeProfile
+                Subscription = $settings.Configuration.Subscription
+                ResourceGroup = $settings.Configuration.ResourceGroup
+            }
+        } else { 
+            @{} 
+        }
+    }
+    
+    $settingsHash.Configuration.Subscription = $SubscriptionId
+    Set-DeploymentSettings $settingsHash
+    Write-Log "Subscription set to: $SubscriptionId" "CONFIG" "Green"
+}
+
+function Get-ResourceGroup {
+    $settings = Get-DeploymentSettings
+    if ($settings.Configuration -and $settings.Configuration.ResourceGroup) {
+        return $settings.Configuration.ResourceGroup
+    }
+    return $null
+}
+
+function Set-ResourceGroup {
+    param([string]$ResourceGroupName)
+    $settings = Get-DeploymentSettings
+    
+    # Convert to hashtable for modification
+    $settingsHash = @{
+        SelectedParameterFile = $settings.SelectedParameterFile
+        LastUpdated = $settings.LastUpdated
+        FileOrder = $settings.FileOrder
+        Configuration = if ($settings.Configuration) { 
+            @{
+                DesiredTenant = $settings.Configuration.DesiredTenant
+                ChromeProfile = $settings.Configuration.ChromeProfile
+                Subscription = $settings.Configuration.Subscription
+                ResourceGroup = $settings.Configuration.ResourceGroup
+            }
+        } else { 
+            @{} 
+        }
+    }
+    
+    $settingsHash.Configuration.ResourceGroup = $ResourceGroupName
+    Set-DeploymentSettings $settingsHash
+    Write-Log "Resource group set to: $ResourceGroupName" "CONFIG" "Green"
+}
+
+function Get-EffectiveResourceGroup {
+    # Get resource group from settings first, fall back to parameter
+    $settingsResourceGroup = Get-ResourceGroup
+    if ($settingsResourceGroup) {
+        return $settingsResourceGroup
+    }
+    return $ResourceGroup  # Fall back to script parameter
+}
+
+function Invoke-AzureLogin {
+    $desiredTenant = Get-DesiredTenant
+    $chromeProfile = Get-ChromeProfile
+    
+    if (-not $desiredTenant) {
+        Write-Log "No desired tenant configured. Please set tenant first using 'T' option." "ERROR" "Red"
+        return @{
+            IsLoggedIn = $false
+            CurrentTenant = $null
+            DesiredTenant = $null
+            NeedsLogin = $true
+            Message = "No desired tenant configured"
+        }
+    }
+    
+    Write-Log "Initiating Azure login..." "INFO" "Cyan"
+    Write-Log "Desired tenant: $desiredTenant" "INFO" "Yellow"
+    
+    # Check if Chrome profile directory exists and set up browser environment
+    $chromeProfilePath = "$ChromeUserDataPath\$chromeProfile"
+    if ((Test-Path $chromeProfilePath) -and (Test-Path $ChromeExecutablePath)) {
+        Write-Log "Configuring Chrome profile: $chromeProfile for Azure login" "INFO" "Yellow"
+        
+        # Set browser environment variable so Azure CLI uses Chrome with the specific profile
+        $env:BROWSER = "`"$ChromeExecutablePath`" --profile-directory=`"$chromeProfile`""
+        
+        Write-Host "`nStarting Azure login with browser authentication..." -ForegroundColor Cyan
+        Write-Host "Chrome will open to the Azure login page with your configured profile." -ForegroundColor Yellow
+        
+        # Perform Azure login with tenant using browser
+        try {
+            Write-Log "Executing: az login --tenant $desiredTenant" "INFO" "Gray"
+            Write-Host "Chrome will open to the Azure login page with your configured profile." -ForegroundColor Yellow
+            az login --tenant $desiredTenant
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "Azure CLI login completed successfully" "SUCCESS" "Green"
+            } else {
+                Write-Log "Azure CLI login failed with exit code: $LASTEXITCODE" "ERROR" "Red"
+                return @{
+                    IsLoggedIn = $false
+                    CurrentTenant = $null
+                    DesiredTenant = $desiredTenant
+                    NeedsLogin = $true
+                    Message = "Login failed"
+                }
+            }
+        }
+        catch {
+            Write-Log "Error during login: $($_.Exception.Message)" "ERROR" "Red"
+            return @{
+                IsLoggedIn = $false
+                CurrentTenant = $null
+                DesiredTenant = $desiredTenant
+                NeedsLogin = $true
+                Message = "Login exception: $($_.Exception.Message)"
+            }
+        }
+    } else {
+        # Fallback to default browser if Chrome profile not configured
+        if (-not (Test-Path $chromeProfilePath)) {
+            Write-Log "Chrome profile directory not found: $chromeProfilePath" "WARNING" "Yellow"
+        }
+        if (-not (Test-Path $ChromeExecutablePath)) {
+            Write-Log "Chrome executable not found at: $ChromeExecutablePath" "WARNING" "Yellow"
+        }
+        
+        Write-Host "`nChrome profile not configured or Chrome not found." -ForegroundColor Yellow
+        $useDefault = Read-Host "Do you want to login using the default browser? (yes/NO/Help)"
+        
+        switch ($useDefault.ToLower()) {
+            "yes" {
+                Write-Host "`nStarting Azure login with default browser..." -ForegroundColor Cyan
+                try {
+                    # Use browser authentication with default browser
+                    Write-Host "Default browser will open for Azure authentication." -ForegroundColor Yellow
+                    az login --tenant $desiredTenant
+                    
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Log "Azure CLI login completed successfully" "SUCCESS" "Green"
+                    } else {
+                        Write-Log "Azure CLI login failed with exit code: $LASTEXITCODE" "ERROR" "Red"
+                        return @{
+                            IsLoggedIn = $false
+                            CurrentTenant = $null
+                            DesiredTenant = $desiredTenant
+                            NeedsLogin = $true
+                            Message = "Login failed with default browser"
+                        }
+                    }
+                }
+                catch {
+                    Write-Log "Error during login: $($_.Exception.Message)" "ERROR" "Red"
+                    return @{
+                        IsLoggedIn = $false
+                        CurrentTenant = $null
+                        DesiredTenant = $desiredTenant
+                        NeedsLogin = $true
+                        Message = "Login exception: $($_.Exception.Message)"
+                    }
+                }
+            }
+            "help" {
+                Write-Host "`nTo use Chrome with a specific profile, follow these steps:" -ForegroundColor Cyan
+                Write-Host "1. Open Chrome with the desired profile." -ForegroundColor White
+                Write-Host "2. Navigate to 'chrome://version/' and locate the 'Profile Path'." -ForegroundColor White
+                Write-Host "3. Copy the Profile Number from the 'Profile Path' (e.g., 'Profile 35')." -ForegroundColor White
+                Write-Host "4. Save it to the .chromeprofile file in this directory." -ForegroundColor White
+                Write-Host "5. Use the 'T' menu option to configure the tenant and profile." -ForegroundColor White
+                
+                return @{
+                    IsLoggedIn = $false
+                    CurrentTenant = $null
+                    DesiredTenant = $desiredTenant
+                    NeedsLogin = $true
+                    Message = "Login cancelled - help displayed"
+                }
+            }
+            default {
+                Write-Log "Login cancelled by user" "INFO" "Gray"
+                return @{
+                    IsLoggedIn = $false
+                    CurrentTenant = $null
+                    DesiredTenant = $desiredTenant
+                    NeedsLogin = $true
+                    Message = "Login cancelled by user"
+                }
+            }
+        }
+    }
+    
+    # Verify login was successful
+    Start-Sleep -Seconds 2
+    $loginStatus = Test-AzureLogin
+    
+    if ($loginStatus.IsLoggedIn -and -not $loginStatus.NeedsLogin) {
+        Write-Log "Successfully logged in to Azure" "SUCCESS" "Green"
+        Write-Log "Current tenant: $($loginStatus.CurrentTenant)" "INFO" "Green"
+        
+        # Update deployment settings with the selected subscription from login
+        try {
+            $currentAccount = az account show | ConvertFrom-Json
+            $selectedSubscription = $currentAccount.id
+            
+            Write-Log "User selected subscription: $selectedSubscription" "INFO" "Yellow"
+            
+            # Update deployment settings to match user's selection
+            Set-Subscription $selectedSubscription
+            Write-Log "Updated deployment settings with selected subscription" "SUCCESS" "Green"
+        }
+        catch {
+            Write-Log "Could not detect selected subscription from login" "WARNING" "Yellow"
+        }
+    } else {
+        Write-Log "Login verification failed - still not logged into correct tenant" "ERROR" "Red"
+    }
+    
+    # Clean up environment variable
+    if ($env:BROWSER) {
+        Remove-Item Env:BROWSER -ErrorAction SilentlyContinue
+        Write-Log "Cleaned up browser environment variable" "INFO" "Gray"
+    }
+    
+    return $loginStatus
+}
+
+# Load deployment settings from file
+function Load-DeploymentSettings {
+    if (Test-Path $SettingsFile) {
+        try {
+            $settingsData = Get-Content $SettingsFile -Raw | ConvertFrom-Json
+            return @{
+                FileOrder = if ($settingsData.FileOrder) { $settingsData.FileOrder } else { @() }
+                SelectedParameterFile = if ($settingsData.SelectedParameterFile) { $settingsData.SelectedParameterFile } else { $null }
+            }
+        }
+        catch {
+            Write-Host "Warning: Could not load settings file. Using defaults." -ForegroundColor Yellow
+            return @{ FileOrder = @(); SelectedParameterFile = $null }
+        }
+    }
+    return @{ FileOrder = @(); SelectedParameterFile = $null }
+}
+
+# Save deployment settings to file
+function Save-DeploymentSettings {
+    param($FileOrder, $SelectedParameterFile = $null)
+    
+    # Get existing settings to preserve Configuration
+    $existingSettings = Get-DeploymentSettings
+    
+    $settingsData = @{
+        LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        FileOrder = $FileOrder
+        SelectedParameterFile = $SelectedParameterFile
+        Configuration = if ($existingSettings.Configuration) { $existingSettings.Configuration } else { @{} }
+    }
+    
+    try {
+        $settingsData | ConvertTo-Json -Depth 10 | Set-Content $SettingsFile -Encoding UTF8
+    }
+    catch {
+        Write-Log "Warning: Could not save settings file." "WARNING" "Yellow"
+    }
+}
+
+# Get complete deployment settings
+function Get-DeploymentSettings {
+    if (Test-Path $SettingsFile) {
+        try {
+            return Get-Content $SettingsFile -Raw | ConvertFrom-Json
+        }
+        catch {
+            Write-Log "Warning: Could not read settings file, using defaults." "WARNING" "Yellow"
+            return @{
+                SelectedParameterFile = $null
+                LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                Configuration = @{}
+                FileOrder = @()
+            }
+        }
+    } else {
+        return @{
+            SelectedParameterFile = $null
+            LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            Configuration = @{}
+            FileOrder = @()
+        }
+    }
+}
+
+# Set complete deployment settings
+function Set-DeploymentSettings {
+    param($Settings)
+    
+    try {
+        $Settings.LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        $Settings | ConvertTo-Json -Depth 10 | Set-Content $SettingsFile -Encoding UTF8
+    }
+    catch {
+        Write-Log "Warning: Could not save settings file." "WARNING" "Yellow"
+    }
+}
+
+# Update deployment history for a specific template
+function Update-DeploymentHistory {
+    param(
+        [string]$TemplateName,
+        [bool]$Success,
+        [datetime]$DeploymentTime,
+        [double]$Duration,
+        [string]$ErrorMessage = $null
+    )
+    
+    $currentSettings = Load-DeploymentSettings
+    
+    # Update the file order with deployment history
+    $updatedFileOrder = @()
+    foreach ($fileObj in $currentSettings.FileOrder) {
+        if ($fileObj.FileName -eq $TemplateName) {
+            $historyEntry = @{
+                FileName = $fileObj.FileName
+                Enabled = $fileObj.Enabled
+                LastDeployment = $DeploymentTime.ToString("yyyy-MM-dd HH:mm:ss")
+                LastDeploymentSuccess = $Success
+                LastDeploymentDuration = [math]::Round($Duration, 2)
+            }
+            
+            # Add error message for failed deployments, clear it for successful ones
+            if (-not $Success -and $ErrorMessage) {
+                $historyEntry.LastDeploymentError = $ErrorMessage
+            } elseif ($Success) {
+                # Clear any previous error on successful deployment
+                $historyEntry.LastDeploymentError = $null
+            } else {
+                # Preserve existing error if no new error provided
+                if ($fileObj.PSObject.Properties.Name -contains 'LastDeploymentError') {
+                    $historyEntry.LastDeploymentError = $fileObj.LastDeploymentError
+                }
+            }
+            
+            $updatedFileOrder += $historyEntry
+        } else {
+            $updatedFileOrder += $fileObj
+        }
+    }
+    
+    Save-DeploymentSettings -FileOrder $updatedFileOrder -SelectedParameterFile $currentSettings.SelectedParameterFile
+}
+
+# Check if template file has been modified since last successful deployment
+function Test-TemplateModified {
+    param(
+        [string]$TemplateFile,
+        [string]$TemplateName
+    )
+    
+    $currentSettings = Load-DeploymentSettings
+    $fileObj = $currentSettings.FileOrder | Where-Object { $_.FileName -eq $TemplateName }
+    
+    if (-not $fileObj -or -not $fileObj.LastDeployment -or -not $fileObj.LastDeploymentSuccess) {
+        return $true  # No deployment history or last deployment failed
+    }
+    
+    try {
+        $lastDeployment = [datetime]::ParseExact($fileObj.LastDeployment, "yyyy-MM-dd HH:mm:ss", $null)
+        $fileLastModified = (Get-Item $TemplateFile).LastWriteTime
+        
+        return $fileLastModified -gt $lastDeployment
+    }
+    catch {
+        return $true  # If we can't parse dates, assume modified
+    }
+}
+
+# Ask user if they want to skip deployment of unchanged file
+function Confirm-DeployUnchanged {
+    param(
+        [string]$TemplateName,
+        [string]$LastDeployment,
+        [double]$LastDuration
+    )
+    
+    Write-Host "`n$TemplateName has not been modified since last successful deployment:" -ForegroundColor Yellow
+    Write-Host "  Last deployed: $LastDeployment" -ForegroundColor Gray
+    Write-Host "  Duration: $($LastDuration)s" -ForegroundColor Gray
+    Write-Host ""
+    
+    do {
+        $choice = Read-Host "Deploy anyway? [Y]es / [N]o / [A]lways deploy unchanged files"
+        $choice = $choice.ToUpper()
+        if ($choice -eq "" -or $choice -eq "Y") { return "deploy" }
+        if ($choice -eq "N") { return "skip" }
+        if ($choice -eq "A") { return "always" }
+        Write-Host "Invalid choice. Please enter Y, N, or A." -ForegroundColor Red
+    } while ($true)
+}
+
+# Auto-discover BICEP files in current directory
+function Get-BicepFiles {
+    Write-Log "Searching for BICEP files in current directory..." "INFO" "Gray"
+    $bicepFiles = Get-ChildItem -Path "." -Filter "*.bicep" | Sort-Object Name
+    Write-Log "Found $($bicepFiles.Count) BICEP file(s)" "INFO" "Gray"
+    
+    foreach ($file in $bicepFiles) {
+        Write-Log "File found: $($file.Name) - BaseName: $($file.BaseName)" "INFO" "Gray"
+    }
+    
+    if ($bicepFiles.Count -eq 0) {
+        Write-Host "No BICEP files found in current directory!" -ForegroundColor Red
+        Write-Host "Current directory: $(Get-Location)" -ForegroundColor Yellow
+        exit 1
+    }
+    
+    # Create file list using ArrayList to avoid PowerShell array issues
+    $fileList = [System.Collections.ArrayList]@()
+    foreach ($file in $bicepFiles) {
+        $sizeKB = [math]::Round($file.Length / 1KB, 2)
+        Write-Log "Processing file: $($file.BaseName) ($sizeKB KB)" "INFO" "Gray"
+        
+        # Create PSCustomObject instead of hashtable
+        $fileObj = [PSCustomObject]@{
+            Name = $file.BaseName
+            File = $file.FullName
+            Description = "Auto-discovered BICEP template"
+            Size = $sizeKB
+            Modified = $file.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+            Enabled = $false  # Start all files disabled
+            IsEmpty = $sizeKB -eq 0
+        }
+        [void]$fileList.Add($fileObj)
+    }
+    
+    Write-Log "Returning $($fileList.Count) file(s) from Get-BicepFiles" "INFO" "Gray"
+    foreach ($file in $fileList) {
+        Write-Log "Returning file: Name=$($file.Name), Size=$($file.Size), Enabled=$($file.Enabled)" "INFO" "Gray"
+    }
+    
+    # Convert ArrayList back to regular array for return
+    return $fileList.ToArray()
+}
+
+# Start deployment logging
+Start-DeploymentLog
+
+# Get available BICEP templates  
+Remove-Variable -Name "BicepFiles" -ErrorAction SilentlyContinue
+$BicepFiles = Get-BicepFiles
+
+# Bicep files loaded successfully
+
+# Load saved parameter file selection and apply enabled status
+$settingsData = Load-DeploymentSettings
+if ($settingsData.SelectedParameterFile) {
+    # Find the parameter file in the current list
+    $savedParamFile = $ParameterFiles | Where-Object { $_.Name -eq $settingsData.SelectedParameterFile }
+    if ($savedParamFile) {
+        $SelectedParameterFile = $savedParamFile
+    }
+}
+
+# Apply enabled status and reorder files according to FileOrder settings
+if ($settingsData.FileOrder) {
+    # Sort FileOrder by Order index, then reorder BicepFiles accordingly
+    $sortedFileOrder = $settingsData.FileOrder | Sort-Object { 
+        if ($_.PSObject.Properties.Name -contains 'Order') { $_.Order } else { 999 }
+    }
+    
+    $reorderedBicepFiles = @()
+    
+    # First, add files in FileOrder sequence
+    foreach ($fileEntry in $sortedFileOrder) {
+        $matchingFile = $BicepFiles | Where-Object { $_.Name -eq $fileEntry.FileName }
+        if ($matchingFile) {
+            # Apply enabled status from settings
+            if ($fileEntry.PSObject.Properties.Name -contains 'Enabled') {
+                $matchingFile.Enabled = $fileEntry.Enabled
+            }
+            $reorderedBicepFiles += $matchingFile
+        }
+    }
+    
+    # Then, add any files not in FileOrder (new files)
+    $filesInOrder = $settingsData.FileOrder | ForEach-Object { $_.FileName }
+    $newFiles = $BicepFiles | Where-Object { $_.Name -notin $filesInOrder }
+    $reorderedBicepFiles += $newFiles
+    
+    # Replace the original array with the reordered one
+    $BicepFiles = $reorderedBicepFiles
+}
+
+function Show-Menu {
+    Clear-Host
+    Write-Host "`n=== BICEP Template Deployment ===" -ForegroundColor Cyan
+    $effectiveResourceGroup = Get-EffectiveResourceGroup
+    # Show Azure tenant status
+    $azureStatus = Test-AzureLogin
+    $desiredTenant = Get-DesiredTenant
+    $subscription = Get-Subscription
+    
+    # Create compact status line
+    $statusParts = @()
+    $statusParts += "RG: $effectiveResourceGroup"
+    
+    if ($desiredTenant) {
+        $shortTenant = $desiredTenant.Substring(0, 8) + "..."
+        $statusParts += "Tenant: $shortTenant"
+    }
+    
+    if ($subscription) {
+        $shortSub = $subscription.Substring(0, 8) + "..."
+        $statusParts += "Sub: $shortSub"
+    }
+    
+    if ($azureStatus.CurrentTenant) {
+        if ($azureStatus.NeedsLogin) {
+            $statusParts += "Status: [!] MISMATCH"
+        } else {
+            $statusParts += "Status: [OK] CORRECT"
+        }
+    } else {
+        $statusParts += "Status: Not logged in"
+    }
+    
+    $statusLine = $statusParts -join " | "
+    Write-Host $statusLine -ForegroundColor Yellow
+    
+    
+    
+    # Show last deployment result if available
+    if ($LastDeploymentResult) {
+        switch ($LastDeploymentResult.Status) {
+            "Success" { Write-Host "Last deployment: " -NoNewline; Write-Host $LastDeploymentResult.Message -ForegroundColor Green }
+            "Partial" { Write-Host "Last deployment: " -NoNewline; Write-Host $LastDeploymentResult.Message -ForegroundColor Yellow }
+            "Failed" { Write-Host "Last deployment: " -NoNewline; Write-Host $LastDeploymentResult.Message -ForegroundColor Red }
+        }
+    }
+    
+    # Show parameter file status
+    if ($ParameterFiles.Count -gt 0) {
+        if ($SelectedParameterFile) {
+            Write-Host "Parameter file: $($SelectedParameterFile.Name)" -ForegroundColor Green
+        } else {
+            Write-Host "Parameter file: None selected (found $($ParameterFiles.Count) available)" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "Parameter file: None found" -ForegroundColor Gray
+    }
+    
+    # Show priority status
+    if (Test-Path $SettingsFile) {
+        Write-Host "Settings: Custom (saved)" -ForegroundColor Green
+    } else {
+        Write-Host "Settings: Default" -ForegroundColor Gray
+    }
+    Write-Host ""
+    
+    for ($i = 0; $i -lt $BicepFiles.Count; $i++) {
+        $nameWithNumber = "$($i + 1). $($BicepFiles[$i].Name)"
+        
+        # Format file size with consistent padding
+        $sizeKB = $BicepFiles[$i].Size
+        $sizeFormatted = if ($sizeKB -ge 10) { "{0:F1}" -f $sizeKB } else { "{0:F2}" -f $sizeKB }
+        $fileInfo = "$sizeFormatted KB | $($BicepFiles[$i].Modified)"
+        
+        # Get deployment history for this file
+        $currentSettings = Load-DeploymentSettings
+        $fileHistory = $currentSettings.FileOrder | Where-Object { $_.FileName -eq $BicepFiles[$i].Name }
+        
+        # Add status indicator and deployment history
+        $status = ""
+        $deploymentInfo = ""
+        $color = "Green"  # Default for enabled, non-empty files
+        
+        # Set colors and status based on file state (priority order)
+        if ($BicepFiles[$i].IsEmpty) {
+            $status = " [EMPTY]"
+            $color = "Magenta"  # Distinct color for empty files
+        } elseif (-not $BicepFiles[$i].Enabled) {
+            $status = " [DISABLED]"
+            $color = "DarkGray"
+        }
+        
+        # Add deployment history if available
+        if ($fileHistory -and $fileHistory.LastDeployment) {
+            $deployStatus = if ($fileHistory.LastDeploymentSuccess) { "[OK]" } else { "[X]" }
+            $deploymentInfo = " | Last: $($fileHistory.LastDeployment) $deployStatus ($($fileHistory.LastDeploymentDuration)s)"
+            
+            # Check if file was modified after last deployment
+            $isModifiedSinceDeployment = $false
+            try {
+                $lastDeployment = [datetime]::ParseExact($fileHistory.LastDeployment, "yyyy-MM-dd HH:mm:ss", $null)
+                $fileLastModified = (Get-Item ".\$($BicepFiles[$i].Name).bicep").LastWriteTime
+                $isModifiedSinceDeployment = $fileLastModified -gt $lastDeployment
+            } catch {
+                # If we can't parse dates, assume modified
+                $isModifiedSinceDeployment = $true
+            }
+            
+            # Set colors based on priority: Empty > Disabled > Failed > Modified > Success
+            if (-not $fileHistory.LastDeploymentSuccess -and $BicepFiles[$i].Enabled -and -not $BicepFiles[$i].IsEmpty) {
+                $color = "Red"  # Red for deployment failures (highest priority)
+            } elseif ($isModifiedSinceDeployment -and $BicepFiles[$i].Enabled -and -not $BicepFiles[$i].IsEmpty) {
+                $color = "Yellow"  # Yellow for files modified since last deployment
+            }
+        }
+        
+        # Create fixed spacing for consistent alignment
+        $nameWithStatus = $nameWithNumber + $status
+        $spacingCount = 45 - $nameWithStatus.Length  # Reduced spacing to accommodate deployment info
+        if ($spacingCount -lt 2) { $spacingCount = 2 }  # Minimum 2 spaces
+        $spacing = " " * $spacingCount
+        
+        Write-Host "$nameWithStatus$spacing$fileInfo$deploymentInfo" -ForegroundColor $color
+    }
+    
+    Write-Host ""
+    # Create horizontal menu with colored letters
+    Write-Host "[" -NoNewline -ForegroundColor White
+    Write-Host "A" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Deploy All Templates - [" -NoNewline -ForegroundColor White
+    Write-Host "O" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Reorder Templates - " -NoNewline -ForegroundColor White
+    if ($ParameterFiles.Count -gt 0) {
+        Write-Host "[" -NoNewline -ForegroundColor White
+        Write-Host "P" -NoNewline -ForegroundColor Yellow
+        Write-Host "] Set Parameter File - " -NoNewline -ForegroundColor White
+    }
+    Write-Host "[" -NoNewline -ForegroundColor White
+    Write-Host "R" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Refresh file list - [" -NoNewline -ForegroundColor White
+    Write-Host "C" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Configuration - [" -NoNewline -ForegroundColor White
+    Write-Host "Q" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Quit" -ForegroundColor White
+    Write-Host ""
+}
+
+function Get-DeploymentMode {
+    Write-Host "`nSelect deployment mode:" -ForegroundColor Cyan
+    Write-Host "[" -NoNewline -ForegroundColor White
+    Write-Host "1" -NoNewline -ForegroundColor Green
+    Write-Host "] Incremental (default) - [" -NoNewline -ForegroundColor White
+    Write-Host "2" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Complete - [" -NoNewline -ForegroundColor White
+    Write-Host "Q" -NoNewline -ForegroundColor Gray
+    Write-Host "] Quit" -ForegroundColor White
+    
+    do {
+        $modeChoice = Read-Host "`nEnter choice (1-2, Q, or press Enter for Incremental)"
+        if ([string]::IsNullOrWhiteSpace($modeChoice)) { $modeChoice = "1" }
+        $modeChoice = $modeChoice.ToUpper()
+        
+        if ($modeChoice -eq "Q") {
+            return "Quit"
+        }
+    } while ($modeChoice -notin @("1", "2", "Q"))
+    
+    if ($modeChoice -eq "2") { 
+        return "Complete" 
+    } else { 
+        return "Incremental" 
+    }
+}
+
+function Select-ParameterFile {
+    if ($ParameterFiles.Count -eq 0) {
+        Write-Host "`nNo parameter files found!" -ForegroundColor Red
+        Read-Host "Press Enter to continue..."
+        return
+    }
+    
+    Write-Host "`n=== Select Parameter File ===" -ForegroundColor Cyan
+    Write-Host "Available parameter files:" -ForegroundColor Yellow
+    Write-Host ""
+    
+    for ($i = 0; $i -lt $ParameterFiles.Count; $i++) {
+        $size = [math]::Round($ParameterFiles[$i].Length / 1KB, 2)
+        $modified = $ParameterFiles[$i].LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+        $selected = if ($SelectedParameterFile -and $ParameterFiles[$i].Name -eq $SelectedParameterFile.Name) { " [CURRENT]" } else { "" }
+        Write-Host "$($i + 1). $($ParameterFiles[$i].Name)$selected" -ForegroundColor Green
+        Write-Host "   Size: $size KB | Modified: $modified" -ForegroundColor Gray
+        Write-Host ""
+    }
+    
+    Write-Host "0. No parameter file (deploy without parameters)" -ForegroundColor Yellow
+    Write-Host "C. Copy parameter file for new environment" -ForegroundColor Cyan
+    Write-Host ""
+    
+    do {
+        $choice = Read-Host "Enter choice (0-$($ParameterFiles.Count), C)"
+        if ($choice -eq "0") {
+            $script:SelectedParameterFile = $null
+            Write-Host "Parameter file cleared - will deploy without parameters" -ForegroundColor Yellow
+            
+            # Save the cleared parameter file selection
+            $currentSettings = Load-DeploymentSettings
+            Save-DeploymentSettings -FileOrder $currentSettings.FileOrder -SelectedParameterFile $null
+            break
+        } elseif ($choice.ToUpper() -eq "C") {
+            # Copy Parameter File for Environment
+            Write-Host "`n=== Copy Parameter File for Environment ===" -ForegroundColor Cyan
+            
+            # Check if we have parameter files to copy from
+            if ($ParameterFiles.Count -eq 0) {
+                Write-Host "[ERROR] No parameter files found to copy!" -ForegroundColor Red
+                Read-Host "Press Enter to continue"
+                continue
+            }
+            
+            # Show available files to copy from
+            Write-Host "Select parameter file to copy from:" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $ParameterFiles.Count; $i++) {
+                Write-Host "$($i + 1). $($ParameterFiles[$i].Name)" -ForegroundColor Green
+            }
+            
+            $sourceChoice = Read-Host "Enter source file number (1-$($ParameterFiles.Count))"
+            if (-not ($sourceChoice -match "^\d+$" -and [int]$sourceChoice -ge 1 -and [int]$sourceChoice -le $ParameterFiles.Count)) {
+                Write-Host "[ERROR] Invalid selection!" -ForegroundColor Red
+                continue
+            }
+            
+            $sourceFile = $ParameterFiles[[int]$sourceChoice - 1]
+            
+            # Get current resource group for default naming
+            $currentResourceGroup = Get-EffectiveResourceGroup
+            if ($currentResourceGroup) {
+                $suggestedName = $currentResourceGroup.ToLower()
+                Write-Host "`nCurrent resource group: $currentResourceGroup" -ForegroundColor Yellow
+                Write-Host "Suggested filename: parameters.$suggestedName.json" -ForegroundColor Green
+            } else {
+                Write-Host "`nNo resource group configured." -ForegroundColor Gray
+            }
+            
+            Write-Host ""
+            Write-Host "This will copy $($sourceFile.Name) to a new environment-specific parameter file." -ForegroundColor Cyan
+            if ($currentResourceGroup) {
+                $environmentName = Read-Host "Enter environment name (or press Enter for '$suggestedName')"
+                if (-not $environmentName -or $environmentName.Trim() -eq "") {
+                    $environmentName = $suggestedName
+                }
+            } else {
+                $environmentName = Read-Host "Enter environment name (e.g., 'predev', 'dev', 'test', 'prod')"
+            }
+            
+            if (-not $environmentName -or $environmentName.Trim() -eq "") {
+                Write-Host "[ERROR] Environment name is required!" -ForegroundColor Red
+                continue
+            }
+            
+            $environmentName = $environmentName.Trim().ToLower()
+            $newFileName = "parameters.$environmentName.json"
+            
+            # Check if target file already exists
+            if (Test-Path $newFileName) {
+                Write-Host "[WARN]  File $newFileName already exists!" -ForegroundColor Yellow
+                $overwrite = Read-Host "Overwrite existing file? (y/N)"
+                if ($overwrite.ToLower() -ne "y") {
+                    Write-Host "Operation cancelled." -ForegroundColor Gray
+                    continue
+                }
+            }
+            
+            try {
+                Copy-Item $sourceFile.FullName $newFileName -Force
+                Write-Host "[OK] Successfully copied $($sourceFile.Name) to $newFileName" -ForegroundColor Green
+                Write-Host "You can now customize $newFileName for your environment." -ForegroundColor Cyan
+                
+                # Ask if they want to switch to the new parameter file
+                $switchFile = Read-Host "Switch to use $newFileName as the active parameter file? (Y/n)"
+                if ($switchFile.ToLower() -ne "n") {
+                    # Refresh parameter files list and select the new one
+                    $script:ParameterFiles = Get-ParameterFiles
+                    $newParamFile = $ParameterFiles | Where-Object { $_.Name -eq $newFileName }
+                    if ($newParamFile) {
+                        $script:SelectedParameterFile = $newParamFile
+                        $currentSettings = Load-DeploymentSettings
+                        Save-DeploymentSettings -FileOrder $currentSettings.FileOrder -SelectedParameterFile $newParamFile.Name
+                        Write-Host "[OK] Switched to $newFileName as active parameter file." -ForegroundColor Green
+                    }
+                }
+                
+                break
+                
+            } catch {
+                Write-Host "[ERROR] Error copying file: $($_.Exception.Message)" -ForegroundColor Red
+                continue
+            }
+        } elseif ($choice -match "^\d+$" -and [int]$choice -ge 1 -and [int]$choice -le $ParameterFiles.Count) {
+            $script:SelectedParameterFile = $ParameterFiles[[int]$choice - 1]
+            Write-Host "Selected parameter file: $($SelectedParameterFile.Name)" -ForegroundColor Green
+            
+            # Save the parameter file selection
+            $currentSettings = Load-DeploymentSettings
+            Save-DeploymentSettings -FileOrder $currentSettings.FileOrder -SelectedParameterFile $SelectedParameterFile.Name
+            break
+        } else {
+            Write-Host "Invalid choice. Please try again." -ForegroundColor Red
+        }
+    } while ($true)
+    
+    Start-Sleep -Seconds 1
+}
+
+function Deploy-BicepTemplate {
+    param(
+        [string]$TemplateFile,
+        [string]$Mode = "Incremental",
+        [string]$TemplateName,
+        [string]$SkipUnchanged = "prompt"  # "prompt", "always", "never"
+    )
+    
+    $deployStartTime = Get-Date
+    
+    # Check if file exists
+    if (-not (Test-Path $TemplateFile)) {
+        Write-Log "ERROR: Template file not found: $TemplateFile" "ERROR" "Red"
+        return $false
+    }
+    
+    # Check if parameter file exists (if selected)
+    if ($SelectedParameterFile -and -not (Test-Path $SelectedParameterFile.FullName)) {
+        Write-Log "ERROR: Parameter file not found: $($SelectedParameterFile.FullName)" "ERROR" "Red"
+        return $false
+    }
+    
+    # Check if file has been modified since last successful deployment
+    if ($SkipUnchanged -ne "never" -and -not (Test-TemplateModified -TemplateFile $TemplateFile -TemplateName $TemplateName)) {
+        $currentSettings = Load-DeploymentSettings
+        $fileHistory = $currentSettings.FileOrder | Where-Object { $_.FileName -eq $TemplateName }
+        
+        if ($SkipUnchanged -eq "always") {
+            Write-Log "⏭ SKIPPED: $TemplateName (unchanged since last successful deployment)" "SKIP" "Yellow"
+            return "skipped"
+        } elseif ($SkipUnchanged -eq "prompt") {
+            $choice = Confirm-DeployUnchanged -TemplateName $TemplateName -LastDeployment $fileHistory.LastDeployment -LastDuration $fileHistory.LastDeploymentDuration
+            if ($choice -eq "skip") {
+                Write-Log "⏭ SKIPPED: $TemplateName (user choice)" "SKIP" "Yellow"
+                return "skipped"
+            } elseif ($choice -eq "always") {
+                $script:SkipUnchangedGlobal = "always"
+            }
+        }
+    }
+    
+    # Deployment message will be shown by the spinner
+    
+    try {
+        # Parameter argument already built above for the spinner
+        
+        # Build the parameter argument string for Azure CLI
+        $parameterArg = ""
+        if ($SelectedParameterFile) {
+            $parameterArg = "--parameters `"$($SelectedParameterFile.FullName)`""
+        }
+        
+        # Show spinner during deployment
+        $deployMessage = "Deploying $TemplateName"
+        $result = Show-ProgressSpinner -Message $deployMessage -ScriptBlock {
+            param($ResourceGroup, $TemplateFile, $Mode, $ParameterArg, $TemplateName)
+            
+            $azOutput = ""
+            $exitCode = 0
+            
+            try {
+                # Create unique deployment name with timestamp (Azure-friendly format)
+                $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+                # Ensure deployment name is valid for Azure (alphanumeric, hyphens, underscores, periods only, max 64 chars)
+                $cleanTemplateName = $TemplateName -replace '[^a-zA-Z0-9\-_\.]', ''
+                $deploymentName = "$cleanTemplateName-$timestamp"
+                
+                # Ensure deployment name is not too long (Azure limit is 64 characters)
+                if ($deploymentName.Length -gt 64) {
+                    $deploymentName = $deploymentName.Substring(0, 64)
+                }
+                
+                
+                # Use the correct Azure CLI command based on the template
+                if ($TemplateFile -like "*0.connections.bicep*" -and $Mode -eq "Complete") {
+                    # Use the modern command for connections with Complete mode
+                    if ($ParameterArg) {
+                        $azOutput = Invoke-Expression "az deployment group create --resource-group `"$ResourceGroup`" --name `"$deploymentName`" --template-file `"$TemplateFile`" --mode $Mode $ParameterArg 2>&1" | Out-String
+                    } else {
+                        $azOutput = az deployment group create --resource-group "$ResourceGroup" --name "$deploymentName" --template-file "$TemplateFile" --mode $Mode 2>&1 | Out-String
+                    }
+                } else {
+                    # Use the modern command for all other templates
+                    if ($Mode -eq "Complete") {
+                        if ($ParameterArg) {
+                            $azOutput = Invoke-Expression "az deployment group create --resource-group `"$ResourceGroup`" --name `"$deploymentName`" --template-file `"$TemplateFile`" --mode $Mode $ParameterArg 2>&1" | Out-String
+                        } else {
+                            $azOutput = az deployment group create --resource-group "$ResourceGroup" --name "$deploymentName" --template-file "$TemplateFile" --mode $Mode 2>&1 | Out-String
+                        }
+                    } else {
+                        # Incremental mode - don't add --mode parameter as it's the default
+                        if ($ParameterArg) {
+                            $azOutput = Invoke-Expression "az deployment group create --resource-group `"$ResourceGroup`" --name `"$deploymentName`" --template-file `"$TemplateFile`" $ParameterArg 2>&1" | Out-String
+                        } else {
+                            $azOutput = az deployment group create --resource-group "$ResourceGroup" --name "$deploymentName" --template-file "$TemplateFile" 2>&1 | Out-String
+                        }
+                    }
+                }
+                $exitCode = $LASTEXITCODE
+            } catch {
+                $azOutput = $_.Exception.Message
+                $exitCode = 1
+            }
+            
+            return @{
+                Output = $azOutput
+                ExitCode = $exitCode
+            }
+        } -ArgumentList (Get-EffectiveResourceGroup), $TemplateFile, $Mode, $parameterArg, $TemplateName
+        
+        $azOutput = $result.Output
+        $script:LASTEXITCODE = $result.ExitCode
+        
+        $deployEndTime = Get-Date
+        $deployDuration = ($deployEndTime - $deployStartTime).TotalSeconds
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "[OK] Successfully deployed: $TemplateName (Duration: $([math]::Round($deployDuration, 2))s)" "SUCCESS" "Green"
+            Update-DeploymentHistory -TemplateName $TemplateName -Success $true -DeploymentTime $deployStartTime -Duration $deployDuration
+            return $true
+        } else {
+            Write-Log "✗ Failed to deploy: $TemplateName (Duration: $([math]::Round($deployDuration, 2))s)" "ERROR" "Red"
+            # Log the detailed Azure CLI error output
+            $errorDetails = ""
+            if ($azOutput -and $azOutput.Trim() -ne "") {
+                $errorDetails = $azOutput.Trim()
+                Write-Log "Azure CLI Error Details: $errorDetails" "ERROR" "Red"
+            }
+            Update-DeploymentHistory -TemplateName $TemplateName -Success $false -DeploymentTime $deployStartTime -Duration $deployDuration -ErrorMessage $errorDetails
+            return $false
+        }
+    }
+    catch {
+        $deployEndTime = Get-Date
+        $deployDuration = ($deployEndTime - $deployStartTime).TotalSeconds
+        Write-Log "✗ Error deploying $TemplateName : $($_.Exception.Message) (Duration: $([math]::Round($deployDuration, 2))s)" "ERROR" "Red"
+        # Combine exception message and any captured Azure CLI output
+        $errorDetails = $_.Exception.Message
+        if ($azOutput -and $azOutput.Trim() -ne "") {
+            $errorDetails += "`n`nAzure CLI Output: " + $azOutput.Trim()
+            Write-Log "Azure CLI Error Details: $($azOutput.Trim())" "ERROR" "Red"
+        }
+        Update-DeploymentHistory -TemplateName $TemplateName -Success $false -DeploymentTime $deployStartTime -Duration $deployDuration -ErrorMessage $errorDetails
+        return $false
+    }
+}
+
+function Deploy-AllTemplates {
+    $batchStartTime = Get-Date
+    Write-Log "=== STARTING BATCH DEPLOYMENT ===" "BATCH" "Magenta"
+    
+    # Get enabled templates in the order defined by FileOrder settings
+    $deploymentSettings = Load-DeploymentSettings
+    $enabledTemplates = @()
+    
+    if ($deploymentSettings.FileOrder) {
+        # Sort FileOrder by Order index, then use that sequence for deployment
+        $sortedFileOrder = $deploymentSettings.FileOrder | Sort-Object { 
+            if ($_.PSObject.Properties.Name -contains 'Order') { $_.Order } else { 999 }
+        }
+        
+        # Use sorted FileOrder to determine deployment sequence
+        foreach ($fileEntry in $sortedFileOrder) {
+            if ($fileEntry.Enabled) {
+                $matchingTemplate = $BicepFiles | Where-Object { $_.Name -eq $fileEntry.FileName }
+                if ($matchingTemplate) {
+                    $enabledTemplates += $matchingTemplate
+                }
+            }
+        }
+        
+        # Add any enabled files not in FileOrder (new files) at the end
+        $filesInOrder = $deploymentSettings.FileOrder | ForEach-Object { $_.FileName }
+        $newEnabledFiles = $BicepFiles | Where-Object { $_.Enabled -and $_.Name -notin $filesInOrder }
+        $enabledTemplates += $newEnabledFiles
+    } else {
+        # Fallback: use original method if no FileOrder exists
+        $enabledTemplates = $BicepFiles | Where-Object { $_.Enabled }
+    }
+    
+    if ($enabledTemplates.Count -eq 0) {
+        Write-Log "No enabled templates to deploy!" "WARNING" "Red"
+        return
+    }
+    
+    Write-Log "Found $($enabledTemplates.Count) enabled template(s) to deploy" "INFO" "Yellow"
+    
+    # Ask about handling unchanged files for batch deployment
+    Write-Host "`nHow should unchanged files be handled during batch deployment?" -ForegroundColor Cyan
+    Write-Host "[" -NoNewline -ForegroundColor White
+    Write-Host "1" -NoNewline -ForegroundColor Green
+    Write-Host "] Skip unchanged (default) - [" -NoNewline -ForegroundColor White
+    Write-Host "2" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Prompt each - [" -NoNewline -ForegroundColor White
+    Write-Host "3" -NoNewline -ForegroundColor Red
+    Write-Host "] Deploy all - [" -NoNewline -ForegroundColor White
+    Write-Host "Q" -NoNewline -ForegroundColor Gray
+    Write-Host "] Quit" -ForegroundColor White
+    
+    do {
+        $skipChoice = Read-Host "`nEnter choice (1-3, Q, or press Enter for default)"
+        if ([string]::IsNullOrWhiteSpace($skipChoice)) { $skipChoice = "1" }
+        $skipChoice = $skipChoice.ToUpper()
+        
+        if ($skipChoice -eq "Q") {
+            Write-Log "Deployment cancelled by user" "INFO" "Yellow"
+            return
+        }
+    } while ($skipChoice -notin @("1", "2", "3", "Q"))
+    
+    $skipMode = switch ($skipChoice) {
+        "1" { "always" }
+        "2" { "prompt" }
+        "3" { "never" }
+    }
+    
+    $mode = Get-DeploymentMode
+    
+    # Check if user chose to quit
+    if ($mode -eq "Quit") {
+        Write-Log "Deployment cancelled by user" "INFO" "Yellow"
+        return
+    }
+    
+    # Show deployment configuration once at the beginning
+    Write-Log "=== DEPLOYMENT CONFIGURATION ===" "CONFIG" "Cyan"
+    Write-Log "Resource Group: $ResourceGroup" "CONFIG" "Gray"
+    Write-Log "Deployment Mode: $mode" "CONFIG" "Gray"
+    if ($SelectedParameterFile) {
+        Write-Log "Parameter File: $($SelectedParameterFile.Name)" "CONFIG" "Gray"
+    } else {
+        Write-Log "Parameter File: None" "CONFIG" "Gray"
+    }
+    Write-Log "=== STARTING DEPLOYMENTS ===" "CONFIG" "Cyan"
+    $successCount = 0
+    $skipCount = 0
+    $failureCount = 0
+    $totalCount = $enabledTemplates.Count
+    
+    for ($i = 0; $i -lt $enabledTemplates.Count; $i++) {
+        $template = $enabledTemplates[$i]
+        
+        # Use Complete mode only for the first template, then switch to Incremental
+        $deploymentMode = if ($i -eq 0 -and $mode -eq "Complete") { "Complete" } else { "Incremental" }
+        
+        # Log deployment mode changes only once (already shown in configuration)
+        # No additional logging needed here
+        
+        $result = Deploy-BicepTemplate -TemplateFile $template.File -Mode $deploymentMode -TemplateName $template.Name -SkipUnchanged $skipMode
+        
+        # Determine the result type
+        if ($result -eq "skipped") {
+            $skipCount++
+        } elseif ($result -eq $true -or $result -eq "True" -or ($result -is [bool] -and $result)) {
+            $successCount++
+        } else {
+            $failureCount++
+        }
+        Start-Sleep -Seconds 1
+    }
+    
+    $batchEndTime = Get-Date
+    $batchDuration = ($batchEndTime - $batchStartTime).TotalSeconds
+    
+    Write-Log "=== BATCH DEPLOYMENT SUMMARY ===" "SUMMARY" "Cyan"
+    Write-Log "Deployed: $successCount successful, $failureCount failed" "SUMMARY" $(if ($failureCount -eq 0) { "Green" } elseif ($successCount -gt 0) { "Yellow" } else { "Red" })
+    if ($skipCount -gt 0) {
+        Write-Log "Skipped: $skipCount unchanged template(s)" "SUMMARY" "Gray"
+    }
+    Write-Log "Total batch duration: $([math]::Round($batchDuration, 2)) seconds" "SUMMARY" "Gray"
+    
+    $disabledCount = $BicepFiles.Count - $enabledTemplates.Count
+    if ($disabledCount -gt 0) {
+        Write-Log "Disabled: $disabledCount template(s) not included" "SUMMARY" "Gray"
+    }
+    
+    Write-Log "=== BATCH DEPLOYMENT COMPLETED ===" "BATCH" "Magenta"
+    
+    # Pause if there were any failures so user can review errors
+    if ($failureCount -gt 0) {
+        Write-Host ""
+        Read-Host "Press Enter to continue (review errors above)..."
+    }
+    
+    # Set global deployment result for menu display
+    $actualDeployments = $successCount + $failureCount  # Exclude skips from total
+    
+    if ($failureCount -eq 0 -and $successCount -gt 0) {
+        $message = "Successfully deployed $successCount template(s)"
+        if ($skipCount -gt 0) {
+            $message += ", skipped $skipCount unchanged"
+        }
+        $script:LastDeploymentResult = @{ Status = "Success"; Message = $message }
+    } elseif ($successCount -gt 0 -and $failureCount -gt 0) {
+        $message = "Partial success: $successCount deployed, $failureCount failed"
+        if ($skipCount -gt 0) {
+            $message += ", $skipCount skipped"
+        }
+        $script:LastDeploymentResult = @{ Status = "Partial"; Message = $message }
+    } elseif ($failureCount -gt 0) {
+        $message = "All deployments failed ($failureCount failed, $successCount successful)"
+        if ($skipCount -gt 0) {
+            $message += ", $skipCount skipped"
+        }
+        $script:LastDeploymentResult = @{ Status = "Failed"; Message = $message }
+    } else {
+        # All were skipped
+        $script:LastDeploymentResult = @{ Status = "Success"; Message = "All $totalCount templates were skipped (unchanged)" }
+    }
+}
+
+function Show-ReorderList {
+    param($files, $position, $selected)
+    
+    Clear-Host
+    Write-Host "`n=== Reorder Templates ===" -ForegroundColor Cyan
+    Write-Host "Reorder multiple files, then save when done:" -ForegroundColor Yellow
+    Write-Host "[→] Select/Deselect - [↑↓] Move - [←] Enable/Disable - [" -NoNewline -ForegroundColor White
+    Write-Host "S" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Save - [" -NoNewline -ForegroundColor White
+    Write-Host "Q" -NoNewline -ForegroundColor Red
+    Write-Host "] Quit" -ForegroundColor White
+    Write-Host ""
+    
+    for ($i = 0; $i -lt $files.Count; $i++) {
+        $prefix = if ($i -eq $selected) { "[SELECTED] " } else { "" }
+        $arrow = if ($i -eq $position) { "> " } else { "  " }
+        
+        $status = ""
+        $color = "White"
+        
+        if ($files[$i].IsEmpty) {
+            $status = " [EMPTY]"
+            $color = "Red"
+        } elseif (-not $files[$i].Enabled) {
+            $status = " [DISABLED]"
+            if ($i -eq $position) { $color = "Yellow" }
+            elseif ($i -eq $selected) { $color = "Magenta" }
+            else { $color = "DarkGray" }
+        } else {
+            if ($i -eq $position) { $color = "Yellow" }
+            elseif ($i -eq $selected) { $color = "Magenta" }
+            else { $color = "White" }
+        }
+        
+        Write-Host "$arrow$prefix$($i + 1). $($files[$i].Name)$status" -ForegroundColor $color
+    }
+    
+    Write-Host ""
+    if ($selected -ge 0) {
+        if ($files[$selected].IsEmpty) {
+            Write-Host "Selected: $($files[$selected].Name) - EMPTY FILE (cannot be enabled)" -ForegroundColor Red
+        } else {
+            Write-Host "Selected: $($files[$selected].Name) - [↑↓] Move - [→] Deselect - [←] Enable/Disable" -ForegroundColor Magenta
+        }
+    } else {
+        Write-Host "[↑↓] Navigate - [→] Select - [←] Enable/Disable - [" -NoNewline -ForegroundColor White
+        Write-Host "S" -NoNewline -ForegroundColor Yellow
+        Write-Host "] Save - [" -NoNewline -ForegroundColor White
+        Write-Host "Q" -NoNewline -ForegroundColor Red
+        Write-Host "] Quit" -ForegroundColor White
+    }
+    Write-Host ""
+}
+
+function Reorder-Templates {
+    Write-Host "`n=== Reorder Templates ===" -ForegroundColor Cyan
+    Write-Host "Reorder multiple files, then save when done:" -ForegroundColor Yellow
+    Write-Host "[→] Select/Deselect - [↑↓] Move - [←] Enable/Disable - [" -NoNewline -ForegroundColor White
+    Write-Host "S" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Save - [" -NoNewline -ForegroundColor White
+    Write-Host "Q" -NoNewline -ForegroundColor Red
+    Write-Host "] Quit" -ForegroundColor White
+    Write-Host ""
+    
+    $workingFiles = @()
+    for ($i = 0; $i -lt $BicepFiles.Count; $i++) {
+        $workingFiles += $BicepFiles[$i]
+    }
+    
+    $currentPos = 0
+    $selectedItem = -1
+    $originalOrder = @()
+    for ($i = 0; $i -lt $workingFiles.Count; $i++) {
+        $originalOrder += $workingFiles[$i]
+    }
+    
+    do {
+        Show-ReorderList -files $workingFiles -position $currentPos -selected $selectedItem
+        
+        $key = $host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        
+        switch ($key.VirtualKeyCode) {
+            37 { # Left arrow - Toggle enable/disable
+                # Check if file is empty
+                if ($workingFiles[$currentPos].IsEmpty) {
+                    Write-Host "`n$($workingFiles[$currentPos].Name) is empty (0 KB) and cannot be enabled!" -ForegroundColor Red
+                    Start-Sleep -Milliseconds 1000
+                } else {
+                    $workingFiles[$currentPos].Enabled = -not $workingFiles[$currentPos].Enabled
+                    $statusText = if ($workingFiles[$currentPos].Enabled) { "enabled" } else { "disabled" }
+                    Write-Host "`n$($workingFiles[$currentPos].Name) is now $statusText" -ForegroundColor $(if ($workingFiles[$currentPos].Enabled) { "Green" } else { "Red" })
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+            38 { # Up arrow
+                if ($selectedItem -ge 0) {
+                    # Move selected item up
+                    if ($selectedItem -gt 0) {
+                        $temp = $workingFiles[$selectedItem]
+                        $workingFiles[$selectedItem] = $workingFiles[$selectedItem - 1]
+                        $workingFiles[$selectedItem - 1] = $temp
+                        $selectedItem--
+                        $currentPos = $selectedItem
+                    }
+                } else {
+                    # Navigate up
+                    if ($currentPos -gt 0) {
+                        $currentPos--
+                    }
+                }
+            }
+            40 { # Down arrow
+                if ($selectedItem -ge 0) {
+                    # Move selected item down
+                    if ($selectedItem -lt $workingFiles.Count - 1) {
+                        $temp = $workingFiles[$selectedItem]
+                        $workingFiles[$selectedItem] = $workingFiles[$selectedItem + 1]
+                        $workingFiles[$selectedItem + 1] = $temp
+                        $selectedItem++
+                        $currentPos = $selectedItem
+                    }
+                } else {
+                    # Navigate down
+                    if ($currentPos -lt $workingFiles.Count - 1) {
+                        $currentPos++
+                    }
+                }
+            }
+            39 { # Right arrow
+                if ($selectedItem -eq $currentPos) {
+                    # Deselect
+                    $selectedItem = -1
+                } else {
+                    # Select current item
+                    $selectedItem = $currentPos
+                }
+            }
+            13 { # Enter - just deselect for now
+                $selectedItem = -1
+            }
+            83 { # S key - Save the reordered list
+                # Apply changes
+                $script:BicepFiles = $workingFiles
+                
+                # Save the new deployment settings while preserving deployment history
+                $currentSettings = Load-DeploymentSettings
+                $fileOrder = @()
+                for ($i = 0; $i -lt $workingFiles.Count; $i++) {
+                    $file = $workingFiles[$i]
+                    # Find existing deployment history for this file
+                    $existingHistory = $currentSettings.FileOrder | Where-Object { $_.FileName -eq $file.Name }
+                    
+                    if ($existingHistory) {
+                        # Preserve all existing properties including deployment history
+                        $fileOrder += @{
+                            FileName = $file.Name
+                            Enabled = $file.Enabled
+                            Order = $i
+                            LastDeployment = if ($existingHistory.PSObject.Properties.Name -contains 'LastDeployment') { $existingHistory.LastDeployment } else { $null }
+                            LastDeploymentSuccess = if ($existingHistory.PSObject.Properties.Name -contains 'LastDeploymentSuccess') { $existingHistory.LastDeploymentSuccess } else { $null }
+                            LastDeploymentDuration = if ($existingHistory.PSObject.Properties.Name -contains 'LastDeploymentDuration') { $existingHistory.LastDeploymentDuration } else { $null }
+                            LastDeploymentError = if ($existingHistory.PSObject.Properties.Name -contains 'LastDeploymentError') { $existingHistory.LastDeploymentError } else { $null }
+                        }
+                    } else {
+                        # New file without history
+                        $fileOrder += @{
+                            FileName = $file.Name
+                            Enabled = $file.Enabled
+                            Order = $i
+                            LastDeployment = $null
+                            LastDeploymentSuccess = $null
+                            LastDeploymentDuration = $null
+                            LastDeploymentError = $null
+                        }
+                    }
+                }
+                
+                $parameterFileName = if ($SelectedParameterFile) { $SelectedParameterFile.Name } else { $null }
+                Save-DeploymentSettings -FileOrder $fileOrder -SelectedParameterFile $parameterFileName
+                
+                Clear-Host
+                Write-Host "`nOrder saved successfully!" -ForegroundColor Green
+                Start-Sleep -Seconds 1
+                return
+            }
+            81 { # Q key - Quit without saving
+                # Cancel - restore original order
+                Clear-Host
+                Write-Host "`nOrder unchanged" -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+                return
+            }
+            27 { # Escape
+                # Cancel - restore original order
+                Clear-Host
+                Write-Host "`nOrder unchanged" -ForegroundColor Yellow
+                Read-Host "Press Enter to continue..."
+                return
+            }
+        }
+    } while ($true)
+}
+
+# Main script execution
+Clear-Host
+
+Write-Log "BICEP Template Deployment Tool v2.0" "START" "Cyan"
+Write-Log "==============================" "START" "Cyan"
+Write-Host "DEBUG: Log file location: $LatestLogFile" -ForegroundColor Magenta
+
+# Check if Azure CLI is available
+try {
+    az --version | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Azure CLI not found"
+    }
+    Write-Log "Azure CLI validation successful" "INFO" "Green"
+} catch {
+    Write-Log "ERROR: Azure CLI is not installed or not in PATH" "ERROR" "Red"
+    Write-Log "Please install Azure CLI and try again." "ERROR" "Red"
+    exit 1
+}
+
+# Configuration submenu functions
+function Show-ConfigurationMenu {
+    Clear-Host
+    Write-Host "`n=== Azure Configuration ===" -ForegroundColor Cyan
+    
+    # Show current settings
+    $currentDesiredTenant = Get-DesiredTenant
+    $currentProfile = Get-ChromeProfile
+    $currentSubscription = Get-Subscription
+    $currentResourceGroup = Get-ResourceGroup
+    
+    Write-Host "Current Settings:" -ForegroundColor Yellow
+    if ($currentDesiredTenant) {
+        # Show tenant ID directly to avoid slow network lookup
+        Write-Host "  Tenant: $currentDesiredTenant" -ForegroundColor Green
+    } else {
+        Write-Host "  Tenant: Not set" -ForegroundColor Gray
+    }
+    
+    if ($currentProfile -and $currentProfile -ne "Default") {
+        Write-Host "  Chrome profile: $currentProfile" -ForegroundColor Green
+    } else {
+        Write-Host "  Chrome profile: Default" -ForegroundColor Gray
+    }
+    
+    if ($currentSubscription) {
+        Write-Host "  Subscription: $currentSubscription" -ForegroundColor Green
+    } else {
+        Write-Host "  Subscription: Not set" -ForegroundColor Gray
+    }
+    
+    if ($currentResourceGroup) {
+        Write-Host "  Resource Group: $currentResourceGroup" -ForegroundColor Green
+    } else {
+        Write-Host "  Resource Group: Not set" -ForegroundColor Gray
+    }
+    
+    Write-Host ""
+    Write-Host "[" -NoNewline -ForegroundColor White
+    Write-Host "T" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Set Tenant - [" -NoNewline -ForegroundColor White
+    Write-Host "V" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Validate Login - [" -NoNewline -ForegroundColor White
+    Write-Host "L" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Login - [" -NoNewline -ForegroundColor White
+    Write-Host "P" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Set Chrome Profile" -ForegroundColor White
+    Write-Host "[" -NoNewline -ForegroundColor White
+    Write-Host "S" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Get Subscriptions - [" -NoNewline -ForegroundColor White
+    Write-Host "R" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Get Resource Groups - [" -NoNewline -ForegroundColor White
+    Write-Host "Q" -NoNewline -ForegroundColor Yellow
+    Write-Host "] Back to Main Menu" -ForegroundColor White
+    Write-Host ""
+}
+
+function Get-AzureSubscriptions {
+    Write-Host "`n=== Azure Subscriptions ===" -ForegroundColor Cyan
+    
+    # Validate Azure connection first
+    $azureStatus = Test-AzureLogin
+    if ($azureStatus.NeedsLogin) {
+        Write-Host "[ERROR] Not logged into Azure. Please login first (L option)." -ForegroundColor Red
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    Write-Host "Fetching subscriptions..." -ForegroundColor Blue
+    try {
+        $allSubscriptions = az account list --output json | ConvertFrom-Json
+        if (-not $allSubscriptions -or $allSubscriptions.Count -eq 0) {
+            Write-Host "No subscriptions found." -ForegroundColor Yellow
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        # Filter subscriptions by desired tenant
+        $desiredTenant = Get-DesiredTenant
+        if ($desiredTenant) {
+            $subscriptions = $allSubscriptions | Where-Object { $_.tenantId -eq $desiredTenant }
+            if (-not $subscriptions -or $subscriptions.Count -eq 0) {
+                Write-Host "No subscriptions found for tenant: $desiredTenant" -ForegroundColor Yellow
+                Write-Host "Total available subscriptions: $($allSubscriptions.Count)" -ForegroundColor Gray
+                Read-Host "Press Enter to continue"
+                return
+            }
+            Write-Host "Found $($subscriptions.Count) subscription(s) for tenant: $desiredTenant" -ForegroundColor Green
+        } else {
+            $subscriptions = $allSubscriptions
+            Write-Host "No tenant filter applied - showing all $($subscriptions.Count) subscriptions" -ForegroundColor Yellow
+        }
+        
+        $currentIndex = 0
+        do {
+            Clear-Host
+            Write-Host "`n=== Select Subscription ===" -ForegroundColor Cyan
+            Write-Host "Use ↑↓ to navigate, Enter to select, Q to cancel:" -ForegroundColor Yellow
+            Write-Host ""
+            
+            for ($i = 0; $i -lt $subscriptions.Count; $i++) {
+                $sub = $subscriptions[$i]
+                $arrow = if ($i -eq $currentIndex) { "→ " } else { "  " }
+                $color = if ($i -eq $currentIndex) { "Yellow" } else { "White" }
+                $state = if ($sub.isDefault) { " (current)" } else { "" }
+                
+                # Create aligned display like file list
+                $nameWithNumber = "$arrow$($i + 1). $($sub.name)$state"
+                $spacingCount = 45 - $nameWithNumber.Length
+                if ($spacingCount -lt 2) { $spacingCount = 2 }  # Minimum 2 spaces
+                $spacing = " " * $spacingCount
+                $idInfo = "ID: $($sub.id)"
+                
+                Write-Host "$nameWithNumber$spacing$idInfo" -ForegroundColor $color
+            }
+            
+            $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            switch ($key.VirtualKeyCode) {
+                38 { # Up arrow
+                    $currentIndex = if ($currentIndex -gt 0) { $currentIndex - 1 } else { $subscriptions.Count - 1 }
+                }
+                40 { # Down arrow
+                    $currentIndex = if ($currentIndex -lt ($subscriptions.Count - 1)) { $currentIndex + 1 } else { 0 }
+                }
+                13 { # Enter
+                    $selectedSub = $subscriptions[$currentIndex]
+                    Set-Subscription $selectedSub.id
+                    Write-Host "`n[OK] Subscription set to: $($selectedSub.name)" -ForegroundColor Green
+                    Read-Host "Press Enter to continue"
+                    return
+                }
+                81 { # Q
+                    return
+                }
+            }
+        } while ($true)
+    }
+    catch {
+        Write-Host "[ERROR] Error fetching subscriptions: $($_.Exception.Message)" -ForegroundColor Red
+        Read-Host "Press Enter to continue"
+    }
+}
+
+function Get-AzureResourceGroups {
+    Write-Host "`n=== Azure Resource Groups ===" -ForegroundColor Cyan
+    
+    # Validate Azure connection first
+    $azureStatus = Test-AzureLogin
+    if ($azureStatus.NeedsLogin) {
+        Write-Host "[ERROR] Not logged into Azure. Please login first (L option)." -ForegroundColor Red
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    Write-Host "Fetching resource groups..." -ForegroundColor Blue
+    try {
+        $resourceGroups = az group list --output json | ConvertFrom-Json
+        if (-not $resourceGroups -or $resourceGroups.Count -eq 0) {
+            Write-Host "No resource groups found." -ForegroundColor Yellow
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        # Sort by name for better navigation
+        $resourceGroups = $resourceGroups | Sort-Object name
+        
+        $currentIndex = 0
+        do {
+            Clear-Host
+            Write-Host "`n=== Select Resource Group ===" -ForegroundColor Cyan
+            Write-Host "Use ↑↓ to navigate, Enter to select, Q to cancel:" -ForegroundColor Yellow
+            Write-Host ""
+            
+            for ($i = 0; $i -lt $resourceGroups.Count; $i++) {
+                $rg = $resourceGroups[$i]
+                $arrow = if ($i -eq $currentIndex) { "→ " } else { "  " }
+                $color = if ($i -eq $currentIndex) { "Yellow" } else { "White" }
+                
+                # Create aligned display like file list
+                $nameWithNumber = "$arrow$($i + 1). $($rg.name)"
+                $spacingCount = 45 - $nameWithNumber.Length
+                if ($spacingCount -lt 2) { $spacingCount = 2 }  # Minimum 2 spaces
+                $spacing = " " * $spacingCount
+                $locationInfo = "Location: $($rg.location)"
+                
+                Write-Host "$nameWithNumber$spacing$locationInfo" -ForegroundColor $color
+            }
+            
+            $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            switch ($key.VirtualKeyCode) {
+                38 { # Up arrow
+                    $currentIndex = if ($currentIndex -gt 0) { $currentIndex - 1 } else { $resourceGroups.Count - 1 }
+                }
+                40 { # Down arrow
+                    $currentIndex = if ($currentIndex -lt ($resourceGroups.Count - 1)) { $currentIndex + 1 } else { 0 }
+                }
+                13 { # Enter
+                    $selectedRG = $resourceGroups[$currentIndex]
+                    Set-ResourceGroup $selectedRG.name
+                    Write-Host "`n[OK] Resource Group set to: $($selectedRG.name)" -ForegroundColor Green
+                    Write-Host "This will be used for all future deployments." -ForegroundColor Cyan
+                    Read-Host "Press Enter to continue"
+                    return
+                }
+                81 { # Q
+                    return
+                }
+            }
+        } while ($true)
+    }
+    catch {
+        Write-Host "[ERROR] Error fetching resource groups: $($_.Exception.Message)" -ForegroundColor Red
+        Read-Host "Press Enter to continue"
+    }
+}
+
+function Show-ConfigurationSubmenu {
+    do {
+        Show-ConfigurationMenu
+        $choice = Read-Host "Enter your choice"
+        
+        switch ($choice.ToUpper()) {
+            "T" {
+                # Set tenant configuration
+                Write-Host "`n=== Set Tenant Configuration ===" -ForegroundColor Cyan
+                
+                $currentDesiredTenant = Get-DesiredTenant
+                
+                # Get available tenants from az account list
+                try {
+                    $accounts = az account list --output json 2>$null | ConvertFrom-Json
+                    if ($accounts -and $accounts.Count -gt 0) {
+                        # Get unique tenants (multiple subscriptions can share the same tenant)
+                        $uniqueTenants = $accounts | Group-Object tenantId | ForEach-Object {
+                            $_.Group[0] | Select-Object tenantId, tenantDisplayName, tenantDefaultDomain
+                        } | Sort-Object tenantDisplayName
+                        
+                        if ($currentDesiredTenant) {
+                            $configuredTenant = $uniqueTenants | Where-Object { $_.tenantId -eq $currentDesiredTenant }
+                            if ($configuredTenant) {
+                                Write-Host "Current configured tenant:" -ForegroundColor Yellow
+                                Write-Host "  $($configuredTenant.tenantDisplayName) ($($configuredTenant.tenantDefaultDomain))" -ForegroundColor Green
+                                Write-Host "  Tenant ID: $currentDesiredTenant" -ForegroundColor Gray
+                            } else {
+                                Write-Host "Current configured tenant: $currentDesiredTenant" -ForegroundColor Yellow
+                                Write-Host "  (Not found in available tenants)" -ForegroundColor Gray
+                            }
+                        } else {
+                            Write-Host "No tenant configured." -ForegroundColor Gray
+                        }
+                        
+                        # Add manual entry option to the list
+                        $allOptions = $uniqueTenants + @([PSCustomObject]@{
+                            tenantId = "manual"
+                            tenantDisplayName = "Enter tenant ID manually"
+                            tenantDefaultDomain = ""
+                        })
+                        
+                        $currentIndex = 0
+                        do {
+                            Clear-Host
+                            Write-Host "`n=== Select Tenant ===" -ForegroundColor Cyan
+                            if ($currentDesiredTenant) {
+                                $configuredTenant = $uniqueTenants | Where-Object { $_.tenantId -eq $currentDesiredTenant }
+                                if ($configuredTenant) {
+                                    Write-Host "Current: $($configuredTenant.tenantDisplayName) ($($configuredTenant.tenantDefaultDomain))" -ForegroundColor Yellow
+                                }
+                            }
+                            Write-Host "Use ↑↓ to navigate, Enter to select, Q to cancel:" -ForegroundColor Yellow
+                            Write-Host ""
+                            
+                            for ($i = 0; $i -lt $allOptions.Count; $i++) {
+                                $option = $allOptions[$i]
+                                $arrow = if ($i -eq $currentIndex) { "→ " } else { "  " }
+                                
+                                if ($option.tenantId -eq "manual") {
+                                    # Manual entry option
+                                    $color = if ($i -eq $currentIndex) { "Yellow" } else { "White" }
+                                    Write-Host "$arrow$($i + 1). $($option.tenantDisplayName)" -ForegroundColor $color
+                                } else {
+                                    # Regular tenant option
+                                    $isCurrent = ($option.tenantId -eq $currentDesiredTenant)
+                                    $marker = if ($isCurrent) { " (current)" } else { "" }
+                                    
+                                    # Color logic: Yellow if selected, Green if current tenant, White otherwise
+                                    $color = if ($i -eq $currentIndex) { 
+                                        "Yellow" 
+                                    } elseif ($isCurrent) { 
+                                        "Green" 
+                                    } else { 
+                                        "White" 
+                                    }
+                                    
+                                    # Create aligned display like resource groups
+                                    $nameWithNumber = "$arrow$($i + 1). $($option.tenantDisplayName) ($($option.tenantDefaultDomain))$marker"
+                                    $spacingCount = 65 - $nameWithNumber.Length
+                                    if ($spacingCount -lt 3) { $spacingCount = 3 }  # Minimum 3 spaces
+                                    $spacing = " " * $spacingCount
+                                    $tenantIdInfo = "ID: $($option.tenantId)"
+                                    
+                                    Write-Host "$nameWithNumber$spacing$tenantIdInfo" -ForegroundColor $color
+                                }
+                            }
+                            
+                            $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                            switch ($key.VirtualKeyCode) {
+                                38 { # Up arrow
+                                    $currentIndex = if ($currentIndex -gt 0) { $currentIndex - 1 } else { $allOptions.Count - 1 }
+                                }
+                                40 { # Down arrow
+                                    $currentIndex = if ($currentIndex -lt ($allOptions.Count - 1)) { $currentIndex + 1 } else { 0 }
+                                }
+                                13 { # Enter
+                                    $selectedOption = $allOptions[$currentIndex]
+                                    if ($selectedOption.tenantId -eq "manual") {
+                                        # Manual entry
+                                        $newTenant = Read-Host "`nEnter tenant ID"
+                                        if ($newTenant -and $newTenant.Trim() -ne "") {
+                                            Set-DesiredTenant $newTenant.Trim()
+                                            Write-Host "[OK] Tenant updated!" -ForegroundColor Green
+                                            Start-Sleep -Seconds 1
+                                        }
+                                    } else {
+                                        # Regular tenant selection
+                                        Set-DesiredTenant $selectedOption.tenantId
+                                        Write-Host "`n[OK] Tenant set to: $($selectedOption.tenantDisplayName)" -ForegroundColor Green
+                                        Start-Sleep -Seconds 1
+                                    }
+                                    return
+                                }
+                                81 { # Q
+                                    return
+                                }
+                            }
+                        } while ($true)
+                        
+                    } else {
+                        Write-Host "No Azure accounts found. Please login first." -ForegroundColor Red
+                        $loginNow = Read-Host "Login to Azure now? (Y/n)"
+                        if ($loginNow.ToLower() -ne "n") {
+                            try {
+                                Invoke-AzureLogin
+                                Write-Host "[OK] Login completed! Please try tenant configuration again." -ForegroundColor Green
+                            } catch {
+                                Write-Host "[ERROR] Login failed: $($_.Exception.Message)" -ForegroundColor Red
+                            }
+                        }
+                        Start-Sleep -Seconds 2
+                    }
+                } catch {
+                    Write-Host "[ERROR] Error retrieving tenant list: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "Falling back to manual entry..." -ForegroundColor Yellow
+                    
+                    $newTenant = Read-Host "Enter tenant ID"
+                    if ($newTenant -and $newTenant.Trim() -ne "") {
+                        Set-DesiredTenant $newTenant.Trim()
+                        Write-Host "[OK] Tenant updated!" -ForegroundColor Green
+                        Start-Sleep -Seconds 1
+                    }
+                }
+            }
+            "V" {
+                # Validate Azure login
+                Write-Host "`n=== Validate Azure Login ===" -ForegroundColor Cyan
+                $azureStatus = Test-AzureLogin
+                
+                Write-Host "Status: $($azureStatus.Message)" -ForegroundColor $(
+                    if ($azureStatus.NeedsLogin) { "Red" } else { "Green" }
+                )
+                
+                if ($azureStatus.DesiredTenant) {
+                    Write-Host "Desired Tenant: $($azureStatus.DesiredTenant)" -ForegroundColor Yellow
+                } else {
+                    Write-Host "Desired Tenant: Not set" -ForegroundColor Gray
+                }
+                
+                if ($azureStatus.CurrentTenant) {
+                    Write-Host "Current Tenant: $($azureStatus.CurrentTenant)" -ForegroundColor $(
+                        if ($azureStatus.NeedsLogin) { "Red" } else { "Green" }
+                    )
+                } else {
+                    Write-Host "Current Tenant: Not logged in" -ForegroundColor Red
+                }
+                
+                if ($azureStatus.NeedsLogin) {
+                    Write-Host "`n[WARN]  Login required! Use 'L' option to login." -ForegroundColor Red
+                } else {
+                    Write-Host "`n[OK] Login status is correct!" -ForegroundColor Green
+                }
+                
+                Read-Host "`nPress Enter to continue"
+            }
+            "L" {
+                # Azure login
+                Write-Host "`n=== Azure Login ===" -ForegroundColor Cyan
+                $azureStatus = Test-AzureLogin
+                
+                if ($azureStatus.NeedsLogin) {
+                    Write-Host "Logging into Azure..." -ForegroundColor Blue
+                    Write-Host "This will open your browser for authentication..." -ForegroundColor Cyan
+                    
+                    try {
+                        Invoke-AzureLogin
+                        Write-Host "`n[OK] Login completed successfully!" -ForegroundColor Green
+                    }
+                    catch {
+                        Write-Host "`n[ERROR] Login failed: $($_.Exception.Message)" -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host "Already logged in with correct tenant." -ForegroundColor Green
+                    Write-Host "Current Status: $($azureStatus.Message)" -ForegroundColor Cyan
+                }
+                
+                Read-Host "Press Enter to continue"
+            }
+            "P" {
+                # Set Chrome profile
+                Write-Host "`n=== Set Chrome Profile ===" -ForegroundColor Cyan
+                $currentProfile = Get-ChromeProfile
+                if ($currentProfile -and $currentProfile -ne "Default") {
+                    Write-Host "Current Chrome profile: $currentProfile" -ForegroundColor Yellow
+                } else {
+                    Write-Host "Current Chrome profile: Default" -ForegroundColor Gray
+                }
+                Write-Host ""
+                Write-Host "Common Chrome profile names:" -ForegroundColor Cyan
+                Write-Host "  - Default (leave blank)" -ForegroundColor Gray
+                Write-Host "  - Profile 1, Profile 2, Profile 3, etc." -ForegroundColor Gray
+                Write-Host "  - Person 1, Person 2, Person 3, etc." -ForegroundColor Gray
+                Write-Host ""
+                $newProfile = Read-Host "Enter Chrome profile name (or press Enter for Default)"
+                if ($newProfile -and $newProfile.Trim() -ne "") {
+                    Set-ChromeProfile $newProfile.Trim()
+                    Write-Host "[OK] Chrome profile updated!" -ForegroundColor Green
+                } else {
+                    # Set to default by clearing the setting
+                    Set-ChromeProfile "Default"
+                    Write-Host "[OK] Chrome profile set to Default!" -ForegroundColor Green
+                }
+                Start-Sleep -Seconds 1
+            }
+            "S" {
+                Get-AzureSubscriptions
+            }
+            "R" {
+                Get-AzureResourceGroups
+            }
+            "Q" {
+                return
+            }
+            default {
+                Write-Host "Invalid option. Please try again." -ForegroundColor Red
+                Start-Sleep -Seconds 1
+            }
+        }
+    } while ($true)
+}
+
+# Main menu loop
+do {
+    Show-Menu
+    $choice = Read-Host "Enter your choice"
+    
+    switch ($choice.ToUpper()) {
+        "Q" { 
+            Write-Host "Goodbye!" -ForegroundColor Green
+            break 
+        }
+        "A" {
+            Deploy-AllTemplates
+        }
+        "O" {
+            Reorder-Templates
+        }
+        "P" {
+            if ($ParameterFiles.Count -gt 0) {
+                Select-ParameterFile
+            } else {
+                Write-Host "`nNo parameter files found in current directory!" -ForegroundColor Red
+                Start-Sleep -Seconds 2
+            }
+        }
+        "R" {
+            Write-Host "Refreshing file list..." -ForegroundColor Blue
+            $discoveredFiles = Get-BicepFiles
+            $script:ParameterFiles = Get-ParameterFiles
+            
+            # Apply enabled status and reorder files according to FileOrder settings
+            $refreshSettings = Load-DeploymentSettings
+            $script:BicepFiles = @()
+            
+            if ($refreshSettings.FileOrder) {
+                # Sort FileOrder by Order index, then add files in that sequence
+                $sortedFileOrder = $refreshSettings.FileOrder | Sort-Object { 
+                    if ($_.PSObject.Properties.Name -contains 'Order') { $_.Order } else { 999 }
+                }
+                
+                foreach ($fileEntry in $sortedFileOrder) {
+                    $matchingFile = $discoveredFiles | Where-Object { $_.Name -eq $fileEntry.FileName }
+                    if ($matchingFile) {
+                        # Apply enabled status from settings
+                        if ($fileEntry.PSObject.Properties.Name -contains 'Enabled') {
+                            $matchingFile.Enabled = $fileEntry.Enabled
+                        }
+                        $script:BicepFiles += $matchingFile
+                    }
+                }
+                
+                # Then, add any new files not in FileOrder (these remain disabled by default)
+                $filesInOrder = $refreshSettings.FileOrder | ForEach-Object { $_.FileName }
+                $newFiles = $discoveredFiles | Where-Object { $_.Name -notin $filesInOrder }
+                $script:BicepFiles += $newFiles
+            } else {
+                # Fallback: use original discovered order if no FileOrder exists
+                $script:BicepFiles = $discoveredFiles
+            }
+            
+            Write-Host "Found $($script:BicepFiles.Count) BICEP file(s) and $($script:ParameterFiles.Count) parameter file(s)" -ForegroundColor Green
+            Start-Sleep -Seconds 1
+        }
+        "C" {
+            Show-ConfigurationSubmenu
+        }
+        default {
+            if ($choice -match "^\d+$" -and [int]$choice -ge 1 -and [int]$choice -le $BicepFiles.Count) {
+                $selectedTemplate = $BicepFiles[[int]$choice - 1]
+                
+                # Check if template is enabled
+                if (-not $selectedTemplate.Enabled) {
+                    Write-Host "`nTemplate '$($selectedTemplate.Name)' is disabled. Enable it first in reorder mode (O)." -ForegroundColor Red
+                    Start-Sleep -Seconds 2
+                } else {
+                    # Check if the template has a previous deployment error
+                    $currentSettings = Load-DeploymentSettings
+                    $fileHistory = $currentSettings.FileOrder | Where-Object { $_.FileName -eq $selectedTemplate.Name }
+                    
+                    if ($fileHistory -and $fileHistory.LastDeploymentError -and -not $fileHistory.LastDeploymentSuccess) {
+                        Write-Host "`n[WARN]  WARNING: Previous deployment failed with error:" -ForegroundColor Red
+                        Write-Host ("=" * 80) -ForegroundColor Red
+                        Write-Host $fileHistory.LastDeploymentError -ForegroundColor Yellow
+                        Write-Host ("=" * 80) -ForegroundColor Red
+                        Write-Host ""
+                        
+                        do {
+                            $continueChoice = Read-Host "Do you want to continue with deployment? [Y]es / [N]o"
+                            $continueChoice = $continueChoice.ToUpper()
+                            if ($continueChoice -eq "" -or $continueChoice -eq "Y") { 
+                                break 
+                            } elseif ($continueChoice -eq "N") { 
+                                Write-Host "Deployment cancelled." -ForegroundColor Yellow
+                                break
+                            }
+                            Write-Host "Invalid choice. Please enter Y or N." -ForegroundColor Red
+                        } while ($true)
+                        
+                        if ($continueChoice -eq "N") {
+                            continue
+                        }
+                    }
+                    
+                    # Only ask for deployment mode if this is the first template in the list
+                    $templateIndex = [int]$choice - 1
+                    if ($templateIndex -eq 0) {
+                        $mode = Get-DeploymentMode
+                        # Check if user chose to quit
+                        if ($mode -eq "Quit") {
+                            continue  # Go back to main menu
+                        }
+                    } else {
+                        $mode = "Incremental"
+                        Write-Log "Using Incremental mode (Complete mode only available for first template)" "INFO" "Yellow"
+                    }
+                    
+                    # Show deployment configuration for individual deployments
+                    Write-Log "=== INDIVIDUAL DEPLOYMENT ===" "CONFIG" "Cyan"
+                    Write-Log "Template: $($selectedTemplate.Name)" "CONFIG" "Gray"
+                    Write-Log "Resource Group: $ResourceGroup" "CONFIG" "Gray"
+                    Write-Log "Deployment Mode: $mode" "CONFIG" "Gray"
+                    if ($SelectedParameterFile) {
+                        Write-Log "Parameter File: $($SelectedParameterFile.Name)" "CONFIG" "Gray"
+                    } else {
+                        Write-Log "Parameter File: None" "CONFIG" "Gray"
+                    }
+                    
+                    $deployResult = Deploy-BicepTemplate -TemplateFile $selectedTemplate.File -Mode $mode -TemplateName $selectedTemplate.Name -SkipUnchanged "prompt"
+                    
+                    # Set individual deployment result for menu display
+                    if ($deployResult -eq $true) {
+                        $script:LastDeploymentResult = @{ Status = "Success"; Message = "$($selectedTemplate.Name) deployed successfully" }
+                    } elseif ($deployResult -eq "skipped") {
+                        $script:LastDeploymentResult = @{ Status = "Success"; Message = "$($selectedTemplate.Name) skipped (unchanged)" }
+                    } else {
+                        $script:LastDeploymentResult = @{ Status = "Failed"; Message = "$($selectedTemplate.Name) deployment failed" }
+                        # Pause after individual deployment failure so user can review error
+                        Write-Host ""
+                        Read-Host "Press Enter to continue (review error above)..."
+                    }
+                }
+            } else {
+                Write-Host "Invalid choice. Please try again." -ForegroundColor Red
+                Start-Sleep -Seconds 2
+            }
+        }
+    }
+} while ($choice.ToUpper() -ne "Q")

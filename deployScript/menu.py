@@ -540,6 +540,7 @@ class MenuSystem:
             {"name": "Get Subscriptions", "key": "S", "action": self._handle_subscription_selection},
             {"name": "Get Resource Groups", "key": "R", "action": self._handle_resource_group_selection},
             {"name": "Console Width", "key": "W", "action": self._handle_console_width_configuration},
+            {"name": "Refresh Azure Status", "key": "F", "action": self._handle_refresh_azure_status},
             {"name": "Back to Main Menu", "key": "Q", "action": None}
         ]
         
@@ -591,6 +592,12 @@ class MenuSystem:
                 print("📊 Active Subscription: None")
             else:
                 print("✅ Azure CLI is available")
+                
+                # Show cache status
+                cache_valid = self.azure_client._is_cache_valid()
+                cache_status = "🟢 Cached" if cache_valid else "🔄 Will refresh"
+                print(f"💾 Status cache: {cache_status}")
+                
                 tenant_info = self.azure_client.get_current_azure_tenant_info()
                 if tenant_info:
                     print(f"🔐 Currently logged in to: {tenant_info['displayName']}")
@@ -599,16 +606,21 @@ class MenuSystem:
                     print("🔐 Currently logged in to: Unknown")
                     print("📊 Active Subscription: None")
             
-            # Display configuration options with arrow navigation
+            # Display configuration options in main menu style
             print(f"\n{separator}")
-            print("Configuration Options (use ↑↓ arrows, ENTER to select):")
-            print()
             
+            # Build options for configuration menu
+            config_options = []
             for i, item in enumerate(config_items):
-                if i == current_selection:
-                    print(f"{Color.CYAN}→ {item['name']}{Color.RESET}")
-                else:
-                    print(f"  {item['name']}")
+                option_text = f"[{item['key']}] {item['name']}"
+                config_options.append(option_text)
+            
+            # Format menu with wrapping like main menu - this will handle coloring
+            menu_lines = self._format_menu_with_wrapping(config_options)
+            
+            # Display menu
+            for line in menu_lines:
+                print(line)
             
             print(f"{separator}")
             
@@ -629,6 +641,15 @@ class MenuSystem:
                     return
             elif key == 'Q':
                 return
+            else:
+                # Handle direct key selection
+                for item in config_items:
+                    if key == item['key']:
+                        if item['action']:
+                            item['action']()
+                        else:  # Back to Main Menu
+                            return
+                        break
     
     def _handle_azure_login(self):
         """Handle Azure login process."""
@@ -664,7 +685,29 @@ class MenuSystem:
     
     def _handle_tenant_selection(self):
         """Handle tenant selection."""
-        logger.log("Tenant selection not yet implemented", LogLevel.INFO, Color.YELLOW)
+        current_tenant = self.config_manager.get_desired_tenant()
+        
+        self.clear_screen()
+        print(self._get_separator())
+        print("    TENANT CONFIGURATION")
+        print(self._get_separator())
+        
+        print(f"\nCurrent tenant: {current_tenant if current_tenant else 'Not set'}")
+        print("\nCommon tenant configurations:")
+        print("  - Leave blank for default tenant selection during login")
+        print("  - Enter specific tenant ID (GUID format)")
+        print("  - Enter tenant domain name (e.g., contoso.onmicrosoft.com)")
+        print("")
+        
+        new_tenant = input("Enter tenant ID/domain (or press Enter to clear): ").strip()
+        if new_tenant:
+            self.config_manager.set_desired_tenant(new_tenant)
+            logger.log(f"Tenant set to: {new_tenant}", LogLevel.SUCCESS, Color.GREEN)
+        elif new_tenant == "":
+            self.config_manager.set_desired_tenant(None)
+            logger.log("Tenant cleared - will use default during login", LogLevel.SUCCESS, Color.GREEN)
+        else:
+            logger.log("No change made", LogLevel.INFO, Color.YELLOW)
     
     def _handle_chrome_profile_selection(self):
         """Handle Chrome profile selection."""
@@ -697,18 +740,42 @@ class MenuSystem:
         print("    SUBSCRIPTION SELECTION")
         print(self._get_separator())
         
-        print("\nAvailable subscriptions:")
+        # Show current subscription
+        current_sub = self.config_manager.get_subscription()
+        if current_sub:
+            print(f"\n📊 Current subscription: {current_sub}")
+        else:
+            print("\n📊 Current subscription: None selected")
+        
+        print(f"\n📋 Available subscriptions ({len(subscriptions)} found):")
+        print()
+        
         for i, sub in enumerate(subscriptions, 1):
-            print(f"  {i}. {sub.name} ({sub.state})")
-            print(f"     ID: {sub.subscription_id}")
+            # Highlight current subscription
+            if current_sub == sub.subscription_id:
+                print(f"  {Color.GREEN}✓ {i:2d}. {sub.name}{Color.RESET}")
+                print(f"      {Color.GRAY}📍 {sub.state} | 🏢 Tenant: {sub.tenant_id}{Color.RESET}")
+                print(f"      {Color.GRAY}🆔 Subscription ID: {sub.subscription_id}{Color.RESET}")
+            else:
+                print(f"    {i:2d}. {sub.name}")
+                print(f"       {Color.GRAY}📍 {sub.state} | 🏢 Tenant: {sub.tenant_id}{Color.RESET}")
+                print(f"       {Color.GRAY}🆔 Subscription ID: {sub.subscription_id}{Color.RESET}")
+            print()
         
         try:
             choice = int(input(f"\nSelect subscription (1-{len(subscriptions)}): ")) - 1
             if 0 <= choice < len(subscriptions):
                 selected_sub = subscriptions[choice]
                 if self.azure_client.set_subscription(selected_sub.subscription_id):
+                    # Set both subscription and tenant
                     self.config_manager.set_subscription(selected_sub.subscription_id)
-                    logger.log(f"Subscription set to: {selected_sub.name}", LogLevel.SUCCESS, Color.GREEN)
+                    self.config_manager.set_desired_tenant(selected_sub.tenant_id)
+                    
+                    logger.log(f"✅ Subscription set to: {selected_sub.name}", LogLevel.SUCCESS, Color.GREEN)
+                    logger.log(f"✅ Tenant automatically set to: {selected_sub.tenant_id}", LogLevel.SUCCESS, Color.GREEN)
+                    
+                    # Invalidate Azure cache since we changed subscription/tenant
+                    self.azure_client.invalidate_cache()
                 else:
                     logger.log("Failed to set subscription", LogLevel.ERROR, Color.RED)
             else:
@@ -779,4 +846,19 @@ class MenuSystem:
                 
         except ValueError:
             logger.log("Please enter a valid number", LogLevel.ERROR, Color.RED)
+    
+    def _handle_refresh_azure_status(self):
+        """Handle refreshing Azure status cache."""
+        logger.log("Refreshing Azure status cache...", LogLevel.INFO, Color.CYAN)
+        self.azure_client.invalidate_cache()
+        
+        # Force a fresh check
+        if self.azure_client.is_azure_cli_available():
+            tenant_info = self.azure_client.get_current_azure_tenant_info()
+            if tenant_info:
+                logger.log(f"✅ Cache refreshed. Logged in to: {tenant_info['displayName']}", LogLevel.SUCCESS, Color.GREEN)
+            else:
+                logger.log("❌ Cache refreshed but not logged in to Azure", LogLevel.WARN, Color.YELLOW)
+        else:
+            logger.log("❌ Azure CLI is not available", LogLevel.ERROR, Color.RED)
 

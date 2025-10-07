@@ -1,0 +1,282 @@
+      actions: {
+        Try: {
+          type: 'Scope'
+          actions: {
+            For_each_file: {
+              type: 'Foreach'
+              foreach: '@triggerBody()'
+              actions: {
+                Get_blob_content: {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(\'$connections\')[\'azureBlob\'][\'connectionId\']'
+                      }
+                    }
+                    method: 'get'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/files/@{encodeURIComponent(encodeURIComponent(items(\'For_each_file\')?[\'Id\']))}/content'
+                  }
+                }
+                Parse_order_proposal: {
+                  type: 'ParseJson'
+                  inputs: {
+                    content: '@body(\'Get_blob_content\')'
+                    schema: {
+                      type: 'object'
+                      properties: {
+                        customerId: {
+                          type: 'string'
+                        }
+                        country: {
+                          type: 'string'
+                        }
+                        deliveryDate: {
+                          type: 'string'
+                        }
+                        items: {
+                          type: 'array'
+                          items: {
+                            type: 'object'
+                            properties: {
+                              itemNo: {
+                                type: 'string'
+                              }
+                              quantity: {
+                                type: 'number'
+                              }
+                              unitPrice: {
+                                type: 'number'
+                              }
+                            }
+                          }
+                        }
+                        bottomlineReference: {
+                          type: 'string'
+                        }
+                      }
+                    }
+                  }
+                  runAfter: {
+                    Get_blob_content: ['Succeeded']
+                  }
+                }
+                Determine_company: {
+                  type: 'Switch'
+                  expression: '@toLower(body(\'Parse_order_proposal\')?[\'country\'])'
+                  cases: {
+                    norway: {
+                      actions: {
+                        Create_order_in_BC_Norway: {
+                          type: 'Http'
+                          inputs: {
+                            method: 'POST'
+                            uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${norwayConfig.companyId})/orderProposals'
+                            headers: {
+                              'Content-Type': 'application/json'
+                            }
+                            body: '@body(\'Parse_order_proposal\')'
+                            authentication: {
+                              type: 'Raw'
+                              value: '@{connectionRuntimeUrl(\'@connections()[\'businessCentral\'].connectionId\')}'
+                            }
+                          }
+                        }
+                        Set_norway_response: {
+                          type: 'SetVariable'
+                          inputs: {
+                            name: 'bcResponse'
+                            value: '@body(\'Create_order_in_BC_Norway\')'
+                          }
+                          runAfter: {
+                            Create_order_in_BC_Norway: ['Succeeded', 'Failed']
+                          }
+                        }
+                      }
+                    }
+                    sweden: {
+                      actions: {
+                        Create_order_in_BC_Sweden: {
+                          type: 'Http'
+                          inputs: {
+                            method: 'POST'
+                            uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${swedenConfig.companyId})/orderProposals'
+                            headers: {
+                              'Content-Type': 'application/json'
+                            }
+                            body: '@body(\'Parse_order_proposal\')'
+                            authentication: {
+                              type: 'Raw'
+                              value: '@{connectionRuntimeUrl(\'@connections()[\'businessCentral\'].connectionId\')}'
+                            }
+                          }
+                        }
+                        Set_sweden_response: {
+                          type: 'SetVariable'
+                          inputs: {
+                            name: 'bcResponse'
+                            value: '@body(\'Create_order_in_BC_Sweden\')'
+                          }
+                          runAfter: {
+                            Create_order_in_BC_Sweden: ['Succeeded', 'Failed']
+                          }
+                        }
+                      }
+                    }
+                  }
+                  default: {
+                    actions: {
+                      Set_error_response: {
+                        type: 'SetVariable'
+                        inputs: {
+                          name: 'bcResponse'
+                          value: {
+                            success: false
+                            errorMessage: 'Invalid country specified'
+                          }
+                        }
+                      }
+                    }
+                  }
+                  runAfter: {
+                    Parse_order_proposal: ['Succeeded']
+                  }
+                }
+                Create_response_blob: {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(\'$connections\')[\'azureBlob\'][\'connectionId\']'
+                      }
+                    }
+                    method: 'post'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/files'
+                    queries: {
+                      folderPath: '/${storageAccount.bottomlinePath}/order-proposal-responses'
+                      name: 'response-@{body(\'Parse_order_proposal\')?[\'bottomlineReference\']}-@{utcNow()}.json'
+                      queryParametersSingleEncoded: true
+                    }
+                    body: '@variables(\'bcResponse\')'
+                  }
+                  runAfter: {
+                    Determine_company: ['Succeeded', 'Failed']
+                  }
+                }
+                Archive_processed_file: {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(\'$connections\')[\'azureBlob\'][\'connectionId\']'
+                      }
+                    }
+                    method: 'post'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/copyFile'
+                    queries: {
+                      source: '@items(\'For_each_file\')?[\'Path\']'
+                      destination: '/${storageAccount.bottomlinePath}/order-proposals/processed/@{items(\'For_each_file\')?[\'Name\']}'
+                      overwrite: true
+                    }
+                  }
+                  runAfter: {
+                    Create_response_blob: ['Succeeded']
+                  }
+                }
+                Delete_original_file: {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(\'$connections\')[\'azureBlob\'][\'connectionId\']'
+                      }
+                    }
+                    method: 'delete'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/files/@{encodeURIComponent(encodeURIComponent(items(\'For_each_file\')?[\'Id\']))}'
+                  }
+                  runAfter: {
+                    Archive_processed_file: ['Succeeded']
+                  }
+                }
+              }
+              runAfter: {
+                Initialize_BC_Response_Variable: ['Succeeded']
+              }
+            }
+            Initialize_BC_Response_Variable: {
+              type: 'InitializeVariable'
+              inputs: {
+                variables: [
+                  {
+                    name: 'bcResponse'
+                    type: 'object'
+                    value: {}
+                  }
+                ]
+              }
+            }
+          }
+        }
+        Catch: {
+          type: 'Scope'
+          actions: {
+            Get_Error_Message: {
+              type: 'Workflow'
+              inputs: {
+                host: {
+                  triggerName: 'manual'
+                  workflow: {
+                    id: childFlows.GetErrorMessage
+                  }
+                }
+                body: {
+                  errorObject: '@result(\'Try\')'
+                  source: 'Bottomline Order Proposal Handler'
+                }
+              }
+            }
+            Send_Error_Notification: {
+              type: 'Workflow'
+              inputs: {
+                host: {
+                  triggerName: 'manual'
+                  workflow: {
+                    id: childFlows.SendNotification
+                  }
+                }
+                body: {
+                  message: '@body(\'Get_Error_Message\')?[\'errorMessage\']'
+                  source: 'Bottomline Order Proposal Handler'
+                  severity: 'Error'
+                }
+              }
+              runAfter: {
+                Get_Error_Message: ['Succeeded']
+              }
+            }
+          }
+          runAfter: {
+            Try: ['Failed', 'Skipped', 'TimedOut']
+          }
+        }
+        Finally: {
+          type: 'Scope'
+          actions: {
+            Response: {
+              type: 'Response'
+              kind: 'Http'
+              inputs: {
+                statusCode: 200
+                body: {
+                  message: 'Order proposal processing completed'
+                  timestamp: '@utcNow()'
+                }
+              }
+            }
+          }
+          runAfter: {
+            Try: ['Succeeded']
+            Catch: ['Succeeded', 'Failed', 'Skipped', 'TimedOut']
+          }
+        }
+      }

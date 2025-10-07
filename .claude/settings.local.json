@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(az deployment group create:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(az deployment group validate:*)",
+      "Bash(powershell:*)",
+      "Bash(az account show:*)",
+      "Bash(git commit:*)",
+      "Bash(git add:*)",
+      "Read(//d/repos/**)",
+      "Bash(git push:*)"
+    ],
+    "deny": []
+  }
+}

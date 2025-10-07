@@ -1,0 +1,376 @@
+param logicAppState string
+param environment string 
+param workflowNames object
+
+param businessCentral object
+param storageAccount object 
+
+#disable-next-line no-unused-params
+param systemReferences object = {}
+#disable-next-line no-unused-params
+param dataverse object
+
+var prefix = 'la-${environment}-bc'
+var nameOfLogicApp string = '${prefix}-bottomline-order-status'
+
+var connections object = {
+  businessCentral: {
+    id: '/subscriptions/${subscription().subscriptionId}/providers/Microsoft.Web/locations/${resourceGroup().location}/managedApis/dynamicssmbsaas'
+    connectionId: resourceId('Microsoft.Web/connections', 'dynamicssmbsaas')
+  }
+
+  azureBlob: {
+    id: '/subscriptions/${subscription().subscriptionId}/providers/Microsoft.Web/locations/${resourceGroup().location}/managedApis/azureblob'
+    connectionId: resourceId('Microsoft.Web/connections', 'azureblob')
+  }
+}
+
+var childFlows object = {
+    GetErrorMessage: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperGetErrorMessage}')
+    SendNotification: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperSendNotification}')
+    ThrowError: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperThrowError}')
+}
+
+var norwayConfig = businessCentral.countries[indexOf(map(businessCentral.countries, c => c.name), 'norway')]
+var swedenConfig = businessCentral.countries[indexOf(map(businessCentral.countries, c => c.name), 'sweden')]
+
+resource resource 'Microsoft.Logic/workflows@2019-05-01' = {
+  name: nameOfLogicApp
+  location: resourceGroup().location
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    state: logicAppState
+    definition: {
+      '$schema': 'https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#'
+      contentVersion: '1.0.0.0'
+      parameters: {
+        '$connections': {
+          defaultValue: {}
+          type: 'Object'
+        }
+      }
+      triggers: {
+        'When_a_blob_is_added_or_modified_(properties_only)_(V2)': {
+          type: 'ApiConnectionNotification'
+          inputs: {
+            host: {
+              connection: {
+                name: '@parameters(\'$connections\')[\'azureBlob\'][\'connectionId\']'
+              }
+            }
+            fetch: {
+              method: 'get'
+              pathTemplate: {
+                template: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/triggers/batch/onupdatedfile'
+              }
+              queries: {
+                folderPath: '/${storageAccount.bottomlinePath}/order-status'
+                maxFileCount: 1
+                checkBothCreatedAndModifiedDateTime: false
+              }
+            }
+            subscribe: {
+              method: 'post'
+              pathTemplate: {
+                template: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/triggers/batch/onupdatedfile'
+              }
+              queries: {
+                folderPath: '/${storageAccount.bottomlinePath}/order-status'
+                maxFileCount: 1
+                checkBothCreatedAndModifiedDateTime: false
+              }
+            }
+          }
+        }
+      }
+      actions: {
+        Initialize_BC_Response_Variable: {
+          type: 'InitializeVariable'
+          inputs: {
+            variables: [
+              {
+                name: 'bcResponse'
+                type: 'object'
+                value: {}
+              }
+            ]
+          }
+        }
+        Try: {
+          type: 'Scope'
+          runAfter: {
+            Initialize_BC_Response_Variable: ['Succeeded']
+          }
+          actions: {
+            For_each_file: {
+              type: 'Foreach'
+              foreach: '@triggerBody()'
+              actions: {
+                Get_blob_content: {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(\'$connections\')[\'azureBlob\'][\'connectionId\']'
+                      }
+                    }
+                    method: 'get'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/files/@{encodeURIComponent(encodeURIComponent(items(\'For_each_file\')?[\'Id\']))}/content'
+                  }
+                }
+                Parse_order_status: {
+                  type: 'ParseJson'
+                  inputs: {
+                    content: '@body(\'Get_blob_content\')'
+                    schema: {
+                      type: 'object'
+                      properties: {
+                        orderNumber: {
+                          type: 'string'
+                        }
+                        country: {
+                          type: 'string'
+                        }
+                        status: {
+                          type: 'string'
+                        }
+                        statusDate: {
+                          type: 'string'
+                        }
+                        notes: {
+                          type: 'string'
+                        }
+                        bottomlineReference: {
+                          type: 'string'
+                        }
+                      }
+                    }
+                  }
+                  runAfter: {
+                    Get_blob_content: ['Succeeded']
+                  }
+                }
+                Determine_company: {
+                  type: 'Switch'
+                  expression: '@toLower(body(\'Parse_order_status\')?[\'country\'])'
+                  cases: {
+                    norway: {
+                      case: 'norway'
+                      actions: {
+                        Update_order_in_BC_Norway: {
+                          type: 'ApiConnection'
+                          inputs: {
+                            host: {
+                              connection: {
+                                name: '@parameters(\'$connections\')[\'dynamicssmbsaas\'][\'connectionId\']'
+                              }
+                            }
+                            method: 'patch'
+                            path: '/v3/bcenvironments/@{encodeURIComponent(encodeURIComponent(\'${businessCentral.environmentName}\'))}/companies/@{encodeURIComponent(encodeURIComponent(\'${norwayConfig.companyId}\'))}/datasets/@{encodeURIComponent(encodeURIComponent(\'${businessCentral.apiCategories.bottomline}\'))}/tables/@{encodeURIComponent(encodeURIComponent(\'salesOrders\'))}/items(@{encodeURIComponent(encodeURIComponent(body(\'Parse_order_status\')?[\'orderNumber\']))})'
+                            body: {
+                              status: '@body(\'Parse_order_status\')?[\'status\']'
+                              statusDate: '@body(\'Parse_order_status\')?[\'statusDate\']'
+                              statusNotes: '@body(\'Parse_order_status\')?[\'notes\']'
+                            }
+                          }
+                        }
+                        Set_norway_response: {
+                          type: 'SetVariable'
+                          inputs: {
+                            name: 'bcResponse'
+                            value: '@body(\'Update_order_in_BC_Norway\')'
+                          }
+                          runAfter: {
+                            Update_order_in_BC_Norway: ['Succeeded', 'Failed']
+                          }
+                        }
+                      }
+                    }
+                    sweden: {
+                      case: 'sweden'
+                      actions: {
+                        Update_order_in_BC_Sweden: {
+                          type: 'ApiConnection'
+                          inputs: {
+                            host: {
+                              connection: {
+                                name: '@parameters(\'$connections\')[\'dynamicssmbsaas\'][\'connectionId\']'
+                              }
+                            }
+                            method: 'patch'
+                            path: '/v3/bcenvironments/@{encodeURIComponent(encodeURIComponent(\'${businessCentral.environmentName}\'))}/companies/@{encodeURIComponent(encodeURIComponent(\'${swedenConfig.companyId}\'))}/datasets/@{encodeURIComponent(encodeURIComponent(\'${businessCentral.apiCategories.bottomline}\'))}/tables/@{encodeURIComponent(encodeURIComponent(\'salesOrders\'))}/items(@{encodeURIComponent(encodeURIComponent(body(\'Parse_order_status\')?[\'orderNumber\']))})'
+                            body: {
+                              status: '@body(\'Parse_order_status\')?[\'status\']'
+                              statusDate: '@body(\'Parse_order_status\')?[\'statusDate\']'
+                              statusNotes: '@body(\'Parse_order_status\')?[\'notes\']'
+                            }
+                          }
+                        }
+                        Set_sweden_response: {
+                          type: 'SetVariable'
+                          inputs: {
+                            name: 'bcResponse'
+                            value: '@body(\'Update_order_in_BC_Sweden\')'
+                          }
+                          runAfter: {
+                            Update_order_in_BC_Sweden: ['Succeeded', 'Failed']
+                          }
+                        }
+                      }
+                    }
+                  }
+                  default: {
+                    actions: {
+                      Set_error_response: {
+                        type: 'SetVariable'
+                        inputs: {
+                          name: 'bcResponse'
+                          value: {
+                            success: false
+                            errorMessage: 'Invalid country specified'
+                          }
+                        }
+                      }
+                    }
+                  }
+                  runAfter: {
+                    Parse_order_status: ['Succeeded']
+                  }
+                }
+                Create_response_blob: {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(\'$connections\')[\'azureBlob\'][\'connectionId\']'
+                      }
+                    }
+                    method: 'post'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/files'
+                    queries: {
+                      folderPath: '/${storageAccount.bottomlinePath}/order-status-responses'
+                      name: 'response-@{body(\'Parse_order_status\')?[\'bottomlineReference\']}-@{utcNow()}.json'
+                      queryParametersSingleEncoded: true
+                    }
+                    body: '@variables(\'bcResponse\')'
+                  }
+                  runAfter: {
+                    Determine_company: ['Succeeded', 'Failed']
+                  }
+                }
+                Archive_processed_file: {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(\'$connections\')[\'azureBlob\'][\'connectionId\']'
+                      }
+                    }
+                    method: 'post'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/copyFile'
+                    queries: {
+                      source: '@items(\'For_each_file\')?[\'Path\']'
+                      destination: '/${storageAccount.bottomlinePath}/order-status/processed/@{items(\'For_each_file\')?[\'Name\']}'
+                      overwrite: true
+                    }
+                  }
+                  runAfter: {
+                    Create_response_blob: ['Succeeded']
+                  }
+                }
+                Delete_original_file: {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(\'$connections\')[\'azureBlob\'][\'connectionId\']'
+                      }
+                    }
+                    method: 'delete'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(\'${storageAccount.containerName}\'))}/files/@{encodeURIComponent(encodeURIComponent(items(\'For_each_file\')?[\'Id\']))}'
+                  }
+                  runAfter: {
+                    Archive_processed_file: ['Succeeded']
+                  }
+                }
+              }
+              runAfter: {}
+            }
+          }
+        }
+        Catch: {
+          type: 'Scope'
+          actions: {
+            Get_Error_Message: {
+              type: 'Workflow'
+              inputs: {
+                host: {
+                  triggerName: 'manual'
+                  workflow: {
+                    id: childFlows.GetErrorMessage
+                  }
+                }
+                body: {
+                  errorObject: '@result(\'Try\')'
+                  source: 'Bottomline Order Status Handler'
+                }
+              }
+            }
+            Send_Error_Notification: {
+              type: 'Workflow'
+              inputs: {
+                host: {
+                  triggerName: 'manual'
+                  workflow: {
+                    id: childFlows.SendNotification
+                  }
+                }
+                body: {
+                  message: '@body(\'Get_Error_Message\')?[\'errorMessage\']'
+                  source: 'Bottomline Order Status Handler'
+                  severity: 'Error'
+                }
+              }
+              runAfter: {
+                Get_Error_Message: ['Succeeded']
+              }
+            }
+          }
+          runAfter: {
+            Try: ['Failed', 'Skipped', 'TimedOut']
+          }
+        }
+        Finally: {
+          type: 'Scope'
+          actions: {
+            Response: {
+              type: 'Response'
+              kind: 'Http'
+              inputs: {
+                statusCode: 200
+                body: {
+                  message: 'Order status processing completed'
+                  timestamp: '@utcNow()'
+                }
+              }
+            }
+          }
+          runAfter: {
+            Try: ['Succeeded']
+            Catch: ['Succeeded', 'Failed', 'Skipped', 'TimedOut']
+          }
+        }
+      }
+      outputs: {}
+    }
+    parameters: {
+      '$connections': {
+        value: connections
+      }
+    }
+  }
+}
+
+output logicAppName string = nameOfLogicApp

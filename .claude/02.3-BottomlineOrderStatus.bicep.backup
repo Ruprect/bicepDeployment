@@ -1,0 +1,486 @@
+param logicAppState string
+param environment string 
+param workflowNames object
+
+param businessCentral object
+param storageAccount object 
+
+#disable-next-line no-unused-params
+param systemReferences object = {}
+#disable-next-line no-unused-params
+param dataverse object
+
+var prefix = 'la-${environment}-bc'
+var nameOfLogicApp string = '${prefix}-bottomline-order-status'
+
+var connections object = {
+  businessCentral: {
+    id: '/subscriptions/${subscription().subscriptionId}/providers/Microsoft.Web/locations/${resourceGroup().location}/managedApis/dynamicssmbsaas'
+    connectionId: resourceId('Microsoft.Web/connections', 'dynamicssmbsaas')
+  }
+
+  azureBlob: {
+    id: '/subscriptions/${subscription().subscriptionId}/providers/Microsoft.Web/locations/${resourceGroup().location}/managedApis/azureblob'
+    connectionId: resourceId('Microsoft.Web/connections', 'azureblob')
+  }
+}
+
+var childFlows object = {
+    GetErrorMessage: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperGetErrorMessage}')
+    SendNotification: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperSendNotification}')
+    ThrowError: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperThrowError}')
+}
+
+var norwayConfig = businessCentral.countries[indexOf(map(businessCentral.countries, c => c.name), 'norway')]
+var swedenConfig = businessCentral.countries[indexOf(map(businessCentral.countries, c => c.name), 'sweden')]
+
+resource resource 'Microsoft.Logic/workflows@2019-05-01' = {
+  name: nameOfLogicApp
+  location: resourceGroup().location
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    state: logicAppState
+    definition: {
+      '$schema': 'https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#'
+      contentVersion: '1.0.0.0'
+      parameters: {
+        '$connections': {
+          defaultValue: {}
+          type: 'Object'
+        }
+      }
+      triggers: {
+        'When_a_blob_is_added_or_modified_(properties_only)_(V2)': {
+          type: 'ApiConnectionNotification'
+          inputs: {
+            host: {
+              connection: {
+                name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+              }
+            }
+            fetch: {
+              method: 'get'
+              pathTemplate: {
+                template: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/triggers/batch/onupdatedfile'
+              }
+              queries: {
+                folderPath: '/${storageAccount.bottomlinePath}/order-status'
+                maxFileCount: 1
+                checkBothCreatedAndModifiedDateTime: false
+              }
+            }
+            subscribe: {
+              method: 'post'
+              pathTemplate: {
+                template: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/triggers/batch/onupdatedfile'
+              }
+              queries: {
+                folderPath: '/${storageAccount.bottomlinePath}/order-status'
+                maxFileCount: 1
+                checkBothCreatedAndModifiedDateTime: false
+              }
+            }
+          }
+        }
+      }
+      actions: {
+        Try: {
+          type: 'Scope'
+          actions: {
+            'For_each_file': {
+              type: 'Foreach'
+              foreach: '@triggerBody()'
+              actions: {
+                'Get_blob_content': {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+                      }
+                    }
+                    method: 'get'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/files/@{encodeURIComponent(encodeURIComponent(items(''For_each_file'')?[''Id'']))}/content'
+                  }
+                }
+                'Parse_order_status': {
+                  type: 'ParseJson'
+                  inputs: {
+                    content: '@body(''Get_blob_content'')'
+                    schema: {
+                      type: 'object'
+                      properties: {
+                        orderNumber: {
+                          type: 'string'
+                        }
+                        orderType: {
+                          type: 'string'
+                        }
+                        country: {
+                          type: 'string'
+                        }
+                        status: {
+                          type: 'string'
+                        }
+                        statusDate: {
+                          type: 'string'
+                        }
+                        additionalInfo: {
+                          type: 'object'
+                        }
+                      }
+                    }
+                  }
+                  runAfter: {
+                    'Get_blob_content': ['Succeeded']
+                  }
+                }
+                'Determine_company_and_order_type': {
+                  type: 'Switch'
+                  expression: '@toLower(body(''Parse_order_status'')?[''country''])'
+                  cases: {
+                    'norway': {
+                      actions: {
+                        'Update_Norway_Order_Status': {
+                          type: 'Switch'
+                          expression: '@toLower(body(''Parse_order_status'')?[''orderType''])'
+                          cases: {
+                            'sales': {
+                              actions: {
+                                'Update_Sales_Order_Norway': {
+                                  type: 'Http'
+                                  inputs: {
+                                    method: 'PATCH'
+                                    uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${norwayConfig.companyId})/salesOrders(''@{body(''Parse_order_status'')?[''orderNumber'']}'')'
+                                    headers: {
+                                      'Content-Type': 'application/json'
+                                    }
+                                    body: {
+                                      bottomlineStatus: '@body(''Parse_order_status'')?[''status'']'
+                                      bottomlineStatusDate: '@body(''Parse_order_status'')?[''statusDate'']'
+                                    }
+                                    authentication: {
+                                      type: 'Raw'
+                                      value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                                    }
+                                  }
+                                }
+                                'Set_norway_sales_response': {
+                                  type: 'SetVariable'
+                                  inputs: {
+                                    name: 'bcResponse'
+                                    value: '@body(''Update_Sales_Order_Norway'')'
+                                  }
+                                  runAfter: {
+                                    'Update_Sales_Order_Norway': ['Succeeded', 'Failed']
+                                  }
+                                }
+                              }
+                            }
+                            'transfer': {
+                              actions: {
+                                'Update_Transfer_Order_Norway': {
+                                  type: 'Http'
+                                  inputs: {
+                                    method: 'PATCH'
+                                    uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${norwayConfig.companyId})/transferOrders(''@{body(''Parse_order_status'')?[''orderNumber'']}'')'
+                                    headers: {
+                                      'Content-Type': 'application/json'
+                                    }
+                                    body: {
+                                      bottomlineStatus: '@body(''Parse_order_status'')?[''status'']'
+                                      bottomlineStatusDate: '@body(''Parse_order_status'')?[''statusDate'']'
+                                    }
+                                    authentication: {
+                                      type: 'Raw'
+                                      value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                                    }
+                                  }
+                                }
+                                'Set_norway_transfer_response': {
+                                  type: 'SetVariable'
+                                  inputs: {
+                                    name: 'bcResponse'
+                                    value: '@body(''Update_Transfer_Order_Norway'')'
+                                  }
+                                  runAfter: {
+                                    'Update_Transfer_Order_Norway': ['Succeeded', 'Failed']
+                                  }
+                                }
+                              }
+                            }
+                          }
+                          default: {
+                            actions: {
+                              'Set_norway_error_response': {
+                                type: 'SetVariable'
+                                inputs: {
+                                  name: 'bcResponse'
+                                  value: {
+                                    success: false
+                                    errorMessage: 'Invalid order type specified for Norway'
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                    'sweden': {
+                      actions: {
+                        'Update_Sweden_Order_Status': {
+                          type: 'Switch'
+                          expression: '@toLower(body(''Parse_order_status'')?[''orderType''])'
+                          cases: {
+                            'sales': {
+                              actions: {
+                                'Update_Sales_Order_Sweden': {
+                                  type: 'Http'
+                                  inputs: {
+                                    method: 'PATCH'
+                                    uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${swedenConfig.companyId})/salesOrders(''@{body(''Parse_order_status'')?[''orderNumber'']}'')'
+                                    headers: {
+                                      'Content-Type': 'application/json'
+                                    }
+                                    body: {
+                                      bottomlineStatus: '@body(''Parse_order_status'')?[''status'']'
+                                      bottomlineStatusDate: '@body(''Parse_order_status'')?[''statusDate'']'
+                                    }
+                                    authentication: {
+                                      type: 'Raw'
+                                      value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                                    }
+                                  }
+                                }
+                                'Set_sweden_sales_response': {
+                                  type: 'SetVariable'
+                                  inputs: {
+                                    name: 'bcResponse'
+                                    value: '@body(''Update_Sales_Order_Sweden'')'
+                                  }
+                                  runAfter: {
+                                    'Update_Sales_Order_Sweden': ['Succeeded', 'Failed']
+                                  }
+                                }
+                              }
+                            }
+                            'transfer': {
+                              actions: {
+                                'Update_Transfer_Order_Sweden': {
+                                  type: 'Http'
+                                  inputs: {
+                                    method: 'PATCH'
+                                    uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${swedenConfig.companyId})/transferOrders(''@{body(''Parse_order_status'')?[''orderNumber'']}'')'
+                                    headers: {
+                                      'Content-Type': 'application/json'
+                                    }
+                                    body: {
+                                      bottomlineStatus: '@body(''Parse_order_status'')?[''status'']'
+                                      bottomlineStatusDate: '@body(''Parse_order_status'')?[''statusDate'']'
+                                    }
+                                    authentication: {
+                                      type: 'Raw'
+                                      value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                                    }
+                                  }
+                                }
+                                'Set_sweden_transfer_response': {
+                                  type: 'SetVariable'
+                                  inputs: {
+                                    name: 'bcResponse'
+                                    value: '@body(''Update_Transfer_Order_Sweden'')'
+                                  }
+                                  runAfter: {
+                                    'Update_Transfer_Order_Sweden': ['Succeeded', 'Failed']
+                                  }
+                                }
+                              }
+                            }
+                          }
+                          default: {
+                            actions: {
+                              'Set_sweden_error_response': {
+                                type: 'SetVariable'
+                                inputs: {
+                                  name: 'bcResponse'
+                                  value: {
+                                    success: false
+                                    errorMessage: 'Invalid order type specified for Sweden'
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                  default: {
+                    actions: {
+                      'Set_error_response': {
+                        type: 'SetVariable'
+                        inputs: {
+                          name: 'bcResponse'
+                          value: {
+                            success: false
+                            errorMessage: 'Invalid country specified'
+                          }
+                        }
+                      }
+                    }
+                  }
+                  runAfter: {
+                    'Parse_order_status': ['Succeeded']
+                  }
+                }
+                'Create_response_blob': {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+                      }
+                    }
+                    method: 'post'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/files'
+                    queries: {
+                      folderPath: '/${storageAccount.bottomlinePath}/order-status-responses'
+                      name: 'response-@{body(''Parse_order_status'')?[''orderNumber'']}-@{utcNow()}.json'
+                      queryParametersSingleEncoded: true
+                    }
+                    body: '@variables(''bcResponse'')'
+                  }
+                  runAfter: {
+                    'Determine_company_and_order_type': ['Succeeded', 'Failed']
+                  }
+                }
+                'Archive_processed_file': {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+                      }
+                    }
+                    method: 'post'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/copyFile'
+                    queries: {
+                      source: '@items(''For_each_file'')?[''Path'']'
+                      destination: '/${storageAccount.bottomlinePath}/order-status/processed/@{items(''For_each_file'')?[''Name'']}'
+                      overwrite: true
+                    }
+                  }
+                  runAfter: {
+                    'Create_response_blob': ['Succeeded']
+                  }
+                }
+                'Delete_original_file': {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+                      }
+                    }
+                    method: 'delete'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/files/@{encodeURIComponent(encodeURIComponent(items(''For_each_file'')?[''Id'']))}'
+                  }
+                  runAfter: {
+                    'Archive_processed_file': ['Succeeded']
+                  }
+                }
+              }
+              runAfter: {
+                'Initialize_BC_Response_Variable': ['Succeeded']
+              }
+            }
+            'Initialize_BC_Response_Variable': {
+              type: 'InitializeVariable'
+              inputs: {
+                variables: [
+                  {
+                    name: 'bcResponse'
+                    type: 'object'
+                    value: {}
+                  }
+                ]
+              }
+            }
+          }
+        }
+        Catch: {
+          type: 'Scope'
+          actions: {
+            'Get_Error_Message': {
+              type: 'Workflow'
+              inputs: {
+                host: {
+                  triggerName: 'manual'
+                  workflow: {
+                    id: childFlows.GetErrorMessage
+                  }
+                }
+                body: {
+                  errorObject: '@result(''Try'')'
+                  source: 'Bottomline Order Status Handler'
+                }
+              }
+            }
+            'Send_Error_Notification': {
+              type: 'Workflow'
+              inputs: {
+                host: {
+                  triggerName: 'manual'
+                  workflow: {
+                    id: childFlows.SendNotification
+                  }
+                }
+                body: {
+                  message: '@body(''Get_Error_Message'')?[''errorMessage'']'
+                  source: 'Bottomline Order Status Handler'
+                  severity: 'Error'
+                }
+              }
+              runAfter: {
+                'Get_Error_Message': ['Succeeded']
+              }
+            }
+          }
+          runAfter: {
+            Try: ['Failed', 'Skipped', 'TimedOut']
+          }
+        }
+        Finally: {
+          type: 'Scope'
+          actions: {
+            'Response': {
+              type: 'Response'
+              kind: 'Http'
+              inputs: {
+                statusCode: 200
+                body: {
+                  message: 'Order status processing completed'
+                  timestamp: '@utcNow()'
+                }
+              }
+            }
+          }
+          runAfter: {
+            Try: ['Succeeded']
+            Catch: ['Succeeded', 'Failed', 'Skipped', 'TimedOut']
+          }
+        }
+      }
+    }
+    parameters: {
+      '$connections': {
+        value: connections
+      }
+    }
+  }
+}
+
+output logicAppName string = nameOfLogicApp

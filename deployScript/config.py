@@ -161,6 +161,34 @@ class ConfigManager:
         settings = self.load_deployment_settings()
         return settings.configuration.get('ConsoleWidth', 75)  # Default to 75 if missing
     
+    def get_azure_cache(self) -> Dict[str, Any]:
+        """Get cached Azure information."""
+        settings = self.load_deployment_settings()
+        return settings.configuration.get('azure_cache', {})
+    
+    def set_azure_cache(self, tenant_info: Optional[Dict[str, Any]], timestamp: datetime) -> None:
+        """Save Azure cache information to deployment settings."""
+        settings = self.load_deployment_settings()
+        settings.configuration['azure_cache'] = {
+            'tenant_info': tenant_info,
+            'timestamp': timestamp.isoformat(),
+            'cli_available': True if tenant_info else False
+        }
+        self.save_deployment_settings(settings)
+    
+    def is_azure_cache_valid(self, cache_duration: int = 30) -> bool:
+        """Check if cached Azure data is still valid."""
+        cache = self.get_azure_cache()
+        if not cache or 'timestamp' not in cache:
+            return False
+        
+        try:
+            cache_time = datetime.fromisoformat(cache['timestamp'])
+            time_since_cache = (datetime.now() - cache_time).total_seconds()
+            return time_since_cache < cache_duration
+        except (ValueError, TypeError):
+            return False
+    
     def set_console_width(self, width: int) -> None:
         """Set the console width in settings."""
         settings = self.load_deployment_settings()

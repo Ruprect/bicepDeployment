@@ -34,11 +34,58 @@ class AzureResourceGroup:
 
 
 class AzureClient:
-    def __init__(self):
+    def __init__(self, config_manager=None):
         self.current_tenant = None
         self.current_subscription = None
         self._cli_available = None  # Cache CLI availability check
         self._az_command = None  # Cache the working az command
+        self._cached_tenant_info = None  # Cache tenant information
+        self._cache_timestamp = None  # When cache was last updated
+        self._cache_duration = 30  # Cache duration in seconds
+        self.config_manager = config_manager
+        
+        # Load persistent cache if config manager is available
+        if self.config_manager:
+            self._load_persistent_cache()
+    
+    def _is_cache_valid(self) -> bool:
+        """Check if cached tenant info is still valid."""
+        if self._cache_timestamp is None or self._cached_tenant_info is None:
+            return False
+        
+        time_since_cache = (datetime.now() - self._cache_timestamp).total_seconds()
+        return time_since_cache < self._cache_duration
+    
+    def _update_cache(self, tenant_info: Optional[Dict[str, Any]]) -> None:
+        """Update cached tenant information."""
+        self._cached_tenant_info = tenant_info
+        self._cache_timestamp = datetime.now()
+        self._save_persistent_cache()
+    
+    def invalidate_cache(self) -> None:
+        """Force invalidation of cached data."""
+        self._cached_tenant_info = None
+        self._cache_timestamp = None
+        if self.config_manager:
+            self.config_manager.set_azure_cache(None, datetime.now())
+    
+    def _load_persistent_cache(self) -> None:
+        """Load cached data from persistent storage."""
+        if not self.config_manager.is_azure_cache_valid(self._cache_duration):
+            return
+        
+        cache = self.config_manager.get_azure_cache()
+        if cache.get('tenant_info'):
+            self._cached_tenant_info = cache['tenant_info']
+            try:
+                self._cache_timestamp = datetime.fromisoformat(cache['timestamp'])
+            except (ValueError, TypeError, KeyError):
+                self._cache_timestamp = None
+    
+    def _save_persistent_cache(self) -> None:
+        """Save cache data to persistent storage."""
+        if self.config_manager and self._cache_timestamp:
+            self.config_manager.set_azure_cache(self._cached_tenant_info, self._cache_timestamp)
     
     def is_azure_cli_available(self) -> bool:
         """Check if Azure CLI is installed and available."""
@@ -156,6 +203,10 @@ class AzureClient:
     
     def get_current_azure_tenant_info(self) -> Optional[Dict[str, Any]]:
         """Get detailed information about the current Azure tenant."""
+        # Return cached result if still valid
+        if self._is_cache_valid():
+            return self._cached_tenant_info
+        
         try:
             az_cmd = self._get_az_command()
             result = subprocess.run(
@@ -177,7 +228,7 @@ class AzureClient:
             
             if tenant_result.returncode == 0:
                 tenant_info = json.loads(tenant_result.stdout)
-                return {
+                result_data = {
                     'tenantId': account_info['tenantId'],
                     'displayName': tenant_info.get('displayName', 'Unknown'),
                     'defaultDomain': tenant_info.get('defaultDomain', 'Unknown'),
@@ -185,19 +236,25 @@ class AzureClient:
                     'subscriptionName': account_info['name']
                 }
             else:
-                return {
+                result_data = {
                     'tenantId': account_info['tenantId'],
                     'displayName': 'Unknown',
                     'defaultDomain': 'Unknown',
                     'subscriptionId': account_info['id'],
                     'subscriptionName': account_info['name']
                 }
+            
+            # Cache the result
+            self._update_cache(result_data)
+            return result_data
                 
         except FileNotFoundError:
             logger.log("Azure CLI (az) not found. Please install Azure CLI first.", LogLevel.ERROR, Color.RED)
+            self._update_cache(None)
             return None
         except (subprocess.SubprocessError, json.JSONDecodeError) as e:
             logger.log(f"Error getting Azure tenant info: {e}", LogLevel.ERROR, Color.RED)
+            self._update_cache(None)
             return None
     
     def invoke_azure_login(self, tenant_id: Optional[str] = None) -> bool:
@@ -214,6 +271,7 @@ class AzureClient:
             
             if result.returncode == 0:
                 logger.log("Azure login successful", LogLevel.SUCCESS, Color.GREEN)
+                self.invalidate_cache()  # Clear cache after successful login
                 return True
             else:
                 logger.log("Azure login failed", LogLevel.ERROR, Color.RED)

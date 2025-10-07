@@ -18,7 +18,7 @@ class DeployScript:
         
         # Initialize components
         self.config_manager = ConfigManager()
-        self.azure_client = AzureClient()
+        self.azure_client = AzureClient(self.config_manager)
         self.bicep_manager = BicepManager(self.config_manager)
         self.deployment_manager = DeploymentManager(
             self.azure_client, 

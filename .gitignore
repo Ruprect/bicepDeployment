@@ -51,3 +51,8 @@ parameters.*.json
 # Temporary files
 *.tmp
 *.temp
+
+# Claude Code artifacts
+.claude/
+claude.md
+CLAUDE.md

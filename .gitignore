@@ -51,3 +51,6 @@ parameters.*.json
 # Temporary files
 *.tmp
 *.temp
+
+# Not ready for commit
+vscode-extension

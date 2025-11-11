@@ -1,0 +1,579 @@
+param logicAppState string
+param environment string 
+param workflowNames object
+
+param businessCentral object
+param storageAccount object 
+
+#disable-next-line no-unused-params
+param systemReferences object = {}
+#disable-next-line no-unused-params
+param dataverse object
+
+var prefix = 'la-${environment}-bc'
+var nameOfLogicApp string = '${prefix}-bottomline-order-shipment'
+
+var connections object = {
+  businessCentral: {
+    id: '/subscriptions/${subscription().subscriptionId}/providers/Microsoft.Web/locations/${resourceGroup().location}/managedApis/dynamicssmbsaas'
+    connectionId: resourceId('Microsoft.Web/connections', 'dynamicssmbsaas')
+  }
+
+  azureBlob: {
+    id: '/subscriptions/${subscription().subscriptionId}/providers/Microsoft.Web/locations/${resourceGroup().location}/managedApis/azureblob'
+    connectionId: resourceId('Microsoft.Web/connections', 'azureblob')
+  }
+}
+
+var childFlows object = {
+    GetErrorMessage: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperGetErrorMessage}')
+    SendNotification: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperSendNotification}')
+    ThrowError: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperThrowError}')
+}
+
+var norwayConfig = businessCentral.countries[indexOf(map(businessCentral.countries, c => c.name), 'norway')]
+var swedenConfig = businessCentral.countries[indexOf(map(businessCentral.countries, c => c.name), 'sweden')]
+
+resource resource 'Microsoft.Logic/workflows@2019-05-01' = {
+  name: nameOfLogicApp
+  location: resourceGroup().location
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    state: logicAppState
+    definition: {
+      '$schema': 'https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#'
+      contentVersion: '1.0.0.0'
+      parameters: {
+        '$connections': {
+          defaultValue: {}
+          type: 'Object'
+        }
+      }
+      triggers: {
+        'When_a_blob_is_added_or_modified_(properties_only)_(V2)': {
+          type: 'ApiConnectionNotification'
+          inputs: {
+            host: {
+              connection: {
+                name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+              }
+            }
+            fetch: {
+              method: 'get'
+              pathTemplate: {
+                template: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/triggers/batch/onupdatedfile'
+              }
+              queries: {
+                folderPath: '/${storageAccount.bottomlinePath}/order-shipments'
+                maxFileCount: 1
+                checkBothCreatedAndModifiedDateTime: false
+              }
+            }
+            subscribe: {
+              method: 'post'
+              pathTemplate: {
+                template: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/triggers/batch/onupdatedfile'
+              }
+              queries: {
+                folderPath: '/${storageAccount.bottomlinePath}/order-shipments'
+                maxFileCount: 1
+                checkBothCreatedAndModifiedDateTime: false
+              }
+            }
+          }
+        }
+      }
+      actions: {
+        Try: {
+          type: 'Scope'
+          actions: {
+            'For_each_file': {
+              type: 'Foreach'
+              foreach: '@triggerBody()'
+              actions: {
+                'Get_blob_content': {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+                      }
+                    }
+                    method: 'get'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/files/@{encodeURIComponent(encodeURIComponent(items(''For_each_file'')?[''Id'']))}/content'
+                  }
+                }
+                'Parse_shipment_data': {
+                  type: 'ParseJson'
+                  inputs: {
+                    content: '@body(''Get_blob_content'')'
+                    schema: {
+                      type: 'object'
+                      properties: {
+                        tripId: {
+                          type: 'string'
+                        }
+                        country: {
+                          type: 'string'
+                        }
+                        tripCompletedDate: {
+                          type: 'string'
+                        }
+                        drivingInfo: {
+                          type: 'object'
+                          properties: {
+                            driverId: {
+                              type: 'string'
+                            }
+                            vehicleId: {
+                              type: 'string'
+                            }
+                            startTime: {
+                              type: 'string'
+                            }
+                            endTime: {
+                              type: 'string'
+                            }
+                            totalDistance: {
+                              type: 'number'
+                            }
+                          }
+                        }
+                        loadInfo: {
+                          type: 'object'
+                          properties: {
+                            initialLoadAmount: {
+                              type: 'number'
+                            }
+                            initialLoadUnit: {
+                              type: 'string'
+                            }
+                            loadLocation: {
+                              type: 'string'
+                            }
+                          }
+                        }
+                        deliveredOrders: {
+                          type: 'array'
+                          items: {
+                            type: 'object'
+                            properties: {
+                              orderNumber: {
+                                type: 'string'
+                              }
+                              orderType: {
+                                type: 'string'
+                              }
+                              deliveredAmount: {
+                                type: 'number'
+                              }
+                              deliveredUnit: {
+                                type: 'string'
+                              }
+                              deliveryTime: {
+                                type: 'string'
+                              }
+                              customerSignature: {
+                                type: 'string'
+                              }
+                            }
+                          }
+                        }
+                        remainingInfo: {
+                          type: 'object'
+                          properties: {
+                            remainingAmount: {
+                              type: 'number'
+                            }
+                            remainingUnit: {
+                              type: 'string'
+                            }
+                            returnLocation: {
+                              type: 'string'
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                  runAfter: {
+                    'Get_blob_content': ['Succeeded']
+                  }
+                }
+                'Determine_company': {
+                  type: 'Switch'
+                  expression: '@toLower(body(''Parse_shipment_data'')?[''country''])'
+                  cases: {
+                    'norway': {
+                      actions: {
+                        'Process_Norway_Shipment': {
+                          type: 'Compose'
+                          inputs: {
+                            tripData: '@body(''Parse_shipment_data'')'
+                            companyId: '${norwayConfig.companyId}'
+                            apiEndpoint: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${norwayConfig.companyId})/shipments'
+                          }
+                        }
+                        'Send_Norway_Shipment_to_BC': {
+                          type: 'Http'
+                          inputs: {
+                            method: 'POST'
+                            uri: '@outputs(''Process_Norway_Shipment'')?[''apiEndpoint'']'
+                            headers: {
+                              'Content-Type': 'application/json'
+                            }
+                            body: '@outputs(''Process_Norway_Shipment'')?[''tripData'']'
+                            authentication: {
+                              type: 'Raw'
+                              value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                            }
+                          }
+                          runAfter: {
+                            'Process_Norway_Shipment': ['Succeeded']
+                          }
+                        }
+                        'Set_norway_response': {
+                          type: 'SetVariable'
+                          inputs: {
+                            name: 'bcResponse'
+                            value: '@body(''Send_Norway_Shipment_to_BC'')'
+                          }
+                          runAfter: {
+                            'Send_Norway_Shipment_to_BC': ['Succeeded', 'Failed']
+                          }
+                        }
+                        'Process_Norway_Delivered_Orders': {
+                          type: 'Foreach'
+                          foreach: '@body(''Parse_shipment_data'')?[''deliveredOrders'']'
+                          actions: {
+                            'Update_Norway_Order_Delivery_Status': {
+                              type: 'Switch'
+                              expression: '@toLower(items(''Process_Norway_Delivered_Orders'')?[''orderType''])'
+                              cases: {
+                                'sales': {
+                                  actions: {
+                                    'Update_Norway_Sales_Order': {
+                                      type: 'Http'
+                                      inputs: {
+                                        method: 'PATCH'
+                                        uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${norwayConfig.companyId})/salesOrders(''@{items(''Process_Norway_Delivered_Orders'')?[''orderNumber'']}'')'
+                                        headers: {
+                                          'Content-Type': 'application/json'
+                                        }
+                                        body: {
+                                          deliveredAmount: '@items(''Process_Norway_Delivered_Orders'')?[''deliveredAmount'']'
+                                          deliveryTime: '@items(''Process_Norway_Delivered_Orders'')?[''deliveryTime'']'
+                                          shipmentStatus: 'Delivered'
+                                          customerSignature: '@items(''Process_Norway_Delivered_Orders'')?[''customerSignature'']'
+                                        }
+                                        authentication: {
+                                          type: 'Raw'
+                                          value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                                'transfer': {
+                                  actions: {
+                                    'Update_Norway_Transfer_Order': {
+                                      type: 'Http'
+                                      inputs: {
+                                        method: 'PATCH'
+                                        uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${norwayConfig.companyId})/transferOrders(''@{items(''Process_Norway_Delivered_Orders'')?[''orderNumber'']}'')'
+                                        headers: {
+                                          'Content-Type': 'application/json'
+                                        }
+                                        body: {
+                                          deliveredAmount: '@items(''Process_Norway_Delivered_Orders'')?[''deliveredAmount'']'
+                                          deliveryTime: '@items(''Process_Norway_Delivered_Orders'')?[''deliveryTime'']'
+                                          shipmentStatus: 'Delivered'
+                                        }
+                                        authentication: {
+                                          type: 'Raw'
+                                          value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                          runAfter: {
+                            'Set_norway_response': ['Succeeded']
+                          }
+                        }
+                      }
+                    }
+                    'sweden': {
+                      actions: {
+                        'Process_Sweden_Shipment': {
+                          type: 'Compose'
+                          inputs: {
+                            tripData: '@body(''Parse_shipment_data'')'
+                            companyId: '${swedenConfig.companyId}'
+                            apiEndpoint: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${swedenConfig.companyId})/shipments'
+                          }
+                        }
+                        'Send_Sweden_Shipment_to_BC': {
+                          type: 'Http'
+                          inputs: {
+                            method: 'POST'
+                            uri: '@outputs(''Process_Sweden_Shipment'')?[''apiEndpoint'']'
+                            headers: {
+                              'Content-Type': 'application/json'
+                            }
+                            body: '@outputs(''Process_Sweden_Shipment'')?[''tripData'']'
+                            authentication: {
+                              type: 'Raw'
+                              value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                            }
+                          }
+                          runAfter: {
+                            'Process_Sweden_Shipment': ['Succeeded']
+                          }
+                        }
+                        'Set_sweden_response': {
+                          type: 'SetVariable'
+                          inputs: {
+                            name: 'bcResponse'
+                            value: '@body(''Send_Sweden_Shipment_to_BC'')'
+                          }
+                          runAfter: {
+                            'Send_Sweden_Shipment_to_BC': ['Succeeded', 'Failed']
+                          }
+                        }
+                        'Process_Sweden_Delivered_Orders': {
+                          type: 'Foreach'
+                          foreach: '@body(''Parse_shipment_data'')?[''deliveredOrders'']'
+                          actions: {
+                            'Update_Sweden_Order_Delivery_Status': {
+                              type: 'Switch'
+                              expression: '@toLower(items(''Process_Sweden_Delivered_Orders'')?[''orderType''])'
+                              cases: {
+                                'sales': {
+                                  actions: {
+                                    'Update_Sweden_Sales_Order': {
+                                      type: 'Http'
+                                      inputs: {
+                                        method: 'PATCH'
+                                        uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${swedenConfig.companyId})/salesOrders(''@{items(''Process_Sweden_Delivered_Orders'')?[''orderNumber'']}'')'
+                                        headers: {
+                                          'Content-Type': 'application/json'
+                                        }
+                                        body: {
+                                          deliveredAmount: '@items(''Process_Sweden_Delivered_Orders'')?[''deliveredAmount'']'
+                                          deliveryTime: '@items(''Process_Sweden_Delivered_Orders'')?[''deliveryTime'']'
+                                          shipmentStatus: 'Delivered'
+                                          customerSignature: '@items(''Process_Sweden_Delivered_Orders'')?[''customerSignature'']'
+                                        }
+                                        authentication: {
+                                          type: 'Raw'
+                                          value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                                'transfer': {
+                                  actions: {
+                                    'Update_Sweden_Transfer_Order': {
+                                      type: 'Http'
+                                      inputs: {
+                                        method: 'PATCH'
+                                        uri: 'https://api.businesscentral.dynamics.com/v2.0/${businessCentral.environmentName}/api/${businessCentral.apiCategories.bottomline}/companies(${swedenConfig.companyId})/transferOrders(''@{items(''Process_Sweden_Delivered_Orders'')?[''orderNumber'']}'')'
+                                        headers: {
+                                          'Content-Type': 'application/json'
+                                        }
+                                        body: {
+                                          deliveredAmount: '@items(''Process_Sweden_Delivered_Orders'')?[''deliveredAmount'']'
+                                          deliveryTime: '@items(''Process_Sweden_Delivered_Orders'')?[''deliveryTime'']'
+                                          shipmentStatus: 'Delivered'
+                                        }
+                                        authentication: {
+                                          type: 'Raw'
+                                          value: '@{connectionRuntimeUrl(''@connections()[''businessCentral''].connectionId'')}'
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                          runAfter: {
+                            'Set_sweden_response': ['Succeeded']
+                          }
+                        }
+                      }
+                    }
+                  }
+                  default: {
+                    actions: {
+                      'Set_error_response': {
+                        type: 'SetVariable'
+                        inputs: {
+                          name: 'bcResponse'
+                          value: {
+                            success: false
+                            errorMessage: 'Invalid country specified'
+                          }
+                        }
+                      }
+                    }
+                  }
+                  runAfter: {
+                    'Parse_shipment_data': ['Succeeded']
+                  }
+                }
+                'Create_response_blob': {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+                      }
+                    }
+                    method: 'post'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/files'
+                    queries: {
+                      folderPath: '/${storageAccount.bottomlinePath}/order-shipment-responses'
+                      name: 'response-@{body(''Parse_shipment_data'')?[''tripId'']}-@{utcNow()}.json'
+                      queryParametersSingleEncoded: true
+                    }
+                    body: '@variables(''bcResponse'')'
+                  }
+                  runAfter: {
+                    'Determine_company': ['Succeeded', 'Failed']
+                  }
+                }
+                'Archive_processed_file': {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+                      }
+                    }
+                    method: 'post'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/copyFile'
+                    queries: {
+                      source: '@items(''For_each_file'')?[''Path'']'
+                      destination: '/${storageAccount.bottomlinePath}/order-shipments/processed/@{items(''For_each_file'')?[''Name'']}'
+                      overwrite: true
+                    }
+                  }
+                  runAfter: {
+                    'Create_response_blob': ['Succeeded']
+                  }
+                }
+                'Delete_original_file': {
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(''$connections'')[''azureBlob''][''connectionId'']'
+                      }
+                    }
+                    method: 'delete'
+                    path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(''${storageAccount.containerName}''))}/files/@{encodeURIComponent(encodeURIComponent(items(''For_each_file'')?[''Id'']))}'
+                  }
+                  runAfter: {
+                    'Archive_processed_file': ['Succeeded']
+                  }
+                }
+              }
+              runAfter: {
+                'Initialize_BC_Response_Variable': ['Succeeded']
+              }
+            }
+            'Initialize_BC_Response_Variable': {
+              type: 'InitializeVariable'
+              inputs: {
+                variables: [
+                  {
+                    name: 'bcResponse'
+                    type: 'object'
+                    value: {}
+                  }
+                ]
+              }
+            }
+          }
+        }
+        Catch: {
+          type: 'Scope'
+          actions: {
+            'Get_Error_Message': {
+              type: 'Workflow'
+              inputs: {
+                host: {
+                  triggerName: 'manual'
+                  workflow: {
+                    id: childFlows.GetErrorMessage
+                  }
+                }
+                body: {
+                  errorObject: '@result(''Try'')'
+                  source: 'Bottomline Order Shipment Handler'
+                }
+              }
+            }
+            'Send_Error_Notification': {
+              type: 'Workflow'
+              inputs: {
+                host: {
+                  triggerName: 'manual'
+                  workflow: {
+                    id: childFlows.SendNotification
+                  }
+                }
+                body: {
+                  message: '@body(''Get_Error_Message'')?[''errorMessage'']'
+                  source: 'Bottomline Order Shipment Handler'
+                  severity: 'Error'
+                }
+              }
+              runAfter: {
+                'Get_Error_Message': ['Succeeded']
+              }
+            }
+          }
+          runAfter: {
+            Try: ['Failed', 'Skipped', 'TimedOut']
+          }
+        }
+        Finally: {
+          type: 'Scope'
+          actions: {
+            'Response': {
+              type: 'Response'
+              kind: 'Http'
+              inputs: {
+                statusCode: 200
+                body: {
+                  message: 'Order shipment processing completed'
+                  timestamp: '@utcNow()'
+                }
+              }
+            }
+          }
+          runAfter: {
+            Try: ['Succeeded']
+            Catch: ['Succeeded', 'Failed', 'Skipped', 'TimedOut']
+          }
+        }
+      }
+    }
+    parameters: {
+      '$connections': {
+        value: connections
+      }
+    }
+  }
+}
+
+output logicAppName string = nameOfLogicApp

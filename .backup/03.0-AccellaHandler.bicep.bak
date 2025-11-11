@@ -1,0 +1,694 @@
+param logicAppState string
+param environment string 
+param workflowNames object
+
+param businessCentral object
+param storageAccount object 
+
+#disable-next-line no-unused-params
+param systemReferences object = {}
+#disable-next-line no-unused-params
+param dataverse object
+
+
+var tableName string = 'accellaTransactions'
+var prefix = 'la-${environment}-bc'
+var nameOfLogicApp string = '${prefix}-${workflowNames.accellaHandler}'
+
+
+var connections object = {
+  businessCentral: {
+    id: '/subscriptions/${subscription().subscriptionId}/providers/Microsoft.Web/locations/${resourceGroup().location}/managedApis/dynamicssmbsaas'
+    connectionId: resourceId('Microsoft.Web/connections', 'dynamicssmbsaas')
+  }
+
+  dataVerse: {
+    id: '/subscriptions/${subscription().subscriptionId}/providers/Microsoft.Web/locations/${resourceGroup().location}/managedApis/commondataservice'
+    connectionId: resourceId('Microsoft.Web/connections', 'commondataservice')
+  }
+
+  azureBlob: {
+    id: '/subscriptions/${subscription().subscriptionId}/providers/Microsoft.Web/locations/${resourceGroup().location}/managedApis/azureblob'
+    connectionId: resourceId('Microsoft.Web/connections', 'azureblob')
+  }
+}
+
+var childFlows object = {
+    bcDataHandler: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.bcDataHandler}')
+    GetErrorMessage: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperGetErrorMessage}')
+    SendNotification: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperSendNotification}')
+    ThrowError: resourceId('Microsoft.Logic/workflows', '${prefix}-${workflowNames.helperThrowError}')
+}
+
+var norwayConfig = businessCentral.countries[indexOf(map(businessCentral.countries, c => c.name), 'norway')]
+var swedenConfig = businessCentral.countries[indexOf(map(businessCentral.countries, c => c.name), 'sweden')]
+
+resource resource 'Microsoft.Logic/workflows@2019-05-01' = {
+  name: nameOfLogicApp
+  location: resourceGroup().location
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    state: logicAppState
+    definition: {
+      '$schema': 'https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#'
+      contentVersion: '1.0.0.0'
+      parameters: {
+        'BC Environment Name': {
+          defaultValue: businessCentral.environmentName
+          type: 'String'
+        }
+        'BC API Category': {
+          defaultValue: businessCentral.apiCategories.crm
+          type: 'String'
+        }
+        'BC Company ID - Norway': {
+          defaultValue: norwayConfig.companyId
+          type: 'String'
+        }
+        'BC Company ID - Sweden': {
+          defaultValue: swedenConfig.companyId
+          type: 'String'
+        }
+        'BC Table Name': {
+          defaultValue: tableName
+          type: 'String'
+        }
+        'Blob Accella Files': {
+          defaultValue: storageAccount.containerName
+          type: 'String'
+        }
+        '$connections': {
+          defaultValue: {}
+          type: 'Object'
+        }
+      }
+      triggers: {
+        Handle_BLOB_file: {
+          type: 'Request'
+          kind: 'Http'
+          inputs: {
+            schema: {
+              type: 'object'
+              properties: {
+                Path: {
+                  type: 'string'
+                  description: 'Full path including filename'
+                }
+                Id: {
+                  type: 'string'
+                  description: 'Unique identifier of BLOB file'
+                }
+                Name: {
+                  type: 'string'
+                  description: 'Filename'
+                }
+              }
+            }
+          }
+        }
+      }
+      actions: {
+        Try: {
+          actions: {
+            'Filter_array_-_Get_company_from_country': {
+              type: 'Query'
+              inputs: {
+                from: [
+                  {
+                    countryName: 'sweden'
+                    companyId: '@parameters(\'BC Company ID - Sweden\')'
+                  }
+                  {
+                    countryName: 'norway'
+                    companyId: '@parameters(\'BC Company ID - Norway\')'
+                  }
+                ]
+                where: '@equals(toUpper(item()[\'countryName\']),toUpper(split(triggerBody()?[\'Path\'],\'/\')[2]))'
+              }
+            }
+            'Get_blob_content_(V2)': {
+              runAfter: {
+                'Filter_array_-_Get_company_from_country': [
+                  'Succeeded'
+                ]
+              }
+              type: 'ApiConnection'
+              inputs: {
+                host: {
+                  connection: {
+                    name: '@parameters(\'$connections\')[\'azureblob\'][\'connectionId\']'
+                  }
+                }
+                method: 'get'
+                path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(parameters(\'Blob Accella Files\')))}/files/@{encodeURIComponent(encodeURIComponent(triggerBody()?[\'Id\']))}/content'
+                queries: {
+                  inferContentType: true
+                }
+              }
+            }
+            'Condition_-_Contain_data': {
+              actions: {}
+              runAfter: {
+                'Get_blob_content_(V2)': [
+                  'Succeeded'
+                ]
+              }
+              else: {
+                actions: {
+                  'Helper-ThrowError_-_Data_is_empty': {
+                    type: 'Workflow'
+                    inputs: {
+                      host: {
+                        workflow: {
+                          id: childFlows.ThrowError
+                        }
+                        triggerName: 'Throw_Error'
+                      }
+                      body: {
+                        status: 500
+                        error: {
+                          message: ' is empty'
+                        }
+                        data: '@null'
+                      }
+                      retryPolicy: {
+                        type: 'none'
+                      }
+                    }
+                    description: 'Call the Throw Error child flow'
+                  }
+                }
+              }
+              expression: {
+                and: [
+                  {
+                    equals: [
+                      '@not(empty(body(\'Get_blob_content_(V2)\')?[\'$content\']))'
+                      '@true'
+                    ]
+                  }
+                ]
+              }
+              type: 'If'
+              description: 'Checks if the parsed data array is empty. If true, terminates the workflow early to avoid unnecessary processing.'
+            }
+            'Scope_-_Parse_AS400_data_to_JSON': {
+              actions: {
+                File_Header: {
+                  actions: {}
+                  runAfter: {
+                    'Parse_JSON_-_Validate_data': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Scope'
+                }
+                Data_Header: {
+                  actions: {}
+                  runAfter: {
+                    'Parse_JSON_-_Validate_data': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Scope'
+                }
+                Data_Lines: {
+                  actions: {}
+                  runAfter: {
+                    'Parse_JSON_-_Validate_data': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Scope'
+                }
+                Tally: {
+                  actions: {}
+                  runAfter: {
+                    'Parse_JSON_-_Validate_data': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Scope'
+                }
+                'Parse_JSON_-_Validate_data': {
+                  type: 'ParseJson'
+                  inputs: {
+                    content: '@split(\r\n  base64ToString(body(\'Get_blob_content_(V2)\')?[\'$content\']),\r\n  \'\r\n\'\r\n)'
+                    schema: {
+                      type: 'array'
+                      items: {
+                        type: 'string'
+                      }
+                    }
+                  }
+                  description: 'Split by newline'
+                }
+                'Filter_array_-__File_Header': {
+                  runAfter: {
+                    File_Header: [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Query'
+                  inputs: {
+                    from: '@body(\'Parse_JSON_-_Validate_data\')'
+                    where: '@equals(startsWith(item(), \'H\'),true)'
+                  }
+                }
+                'Select_-_File_Header': {
+                  runAfter: {
+                    'Filter_array_-__File_Header': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Select'
+                  inputs: {
+                    from: '@body(\'Filter_array_-__File_Header\')'
+                    select: {
+                      interfaceId: '@substring(item(), 1, 3)'
+                      sequenceNumber: '@substring(item(), 4, 5)'
+                      fileCreationDate: '@substring(item(), 9, 8)'
+                      fileCreationTime: '@substring(item(), 17, 6)'
+                      system: '@substring(item(), 23, 10)'
+                      sapSystemId: '@substring(item(), 43, 8)'
+                      sapClientNumber: '@substring(item(), 51, 3)'
+                      sequenceNumberAccella: '@substring(item(), 87, 3)'
+                      depot: '@substring(item(), 91, 3)'
+                      fileCreationDateTimeUTC: '@convertTimeZone(parseDateTime(concat(substring(substring(item(), 9, 8), 0, 4), \'-\', substring(substring(item(), 9, 8), 4, 2), \'-\', substring(substring(item(), 9, 8), 6, 2), \'T\', substring(substring(item(), 17, 6), 0, 2), \':\', substring(substring(item(), 17, 6), 2, 2), \':\', substring(substring(item(), 17, 6), 4, 2))), \'W. Europe Standard Time\', \'UTC\')'
+                    }
+                  }
+                  description: 'Transforms filtered D01 header records into structured objects. Each header contains metadata like depot, loading date/time, truck ID, and shipment details.'
+                }
+                'Filter_array_-_Data_Lines': {
+                  runAfter: {
+                    Data_Lines: [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Query'
+                  inputs: {
+                    from: '@body(\'Parse_JSON_-_Validate_data\')'
+                    where: '@equals(startsWith(item(), \'D02\'),true)'
+                  }
+                }
+                'Select_-_Data_Lines': {
+                  runAfter: {
+                    'Filter_array_-_Data_Lines': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Select'
+                  inputs: {
+                    from: '@body(\'Filter_array_-_Data_Lines\')'
+                    select: {
+                      sequenceNumber: '@int(substring(item(), 3, 10))'
+                      materialTank: '@substring(item(), 13, 18)'
+                      loadType: '@substring(item(), 31, 1)'
+                      quantity: '@decimal(replace(substring(item(), 32, 13), \',\', \'.\'))'
+                      unitForQuantity: '@substring(item(), 45, 3)'
+                      tank: '@substring(item(), 48, 4)'
+                      temperature: '@substring(item(), 52, 5)'
+                      unitForTemperature: '@substring(item(), 57, 3)'
+                      tankroom: '@substring(item(), 60, 2)'
+                      density: '@decimal(replace(substring(item(), 62, 7),\',\',\'.\'))'
+                      meterId: '@substring(item(), 69, 4)'
+                      quantityInStandardLiter: '@decimal(replace(substring(item(), 73, 13),\',\',\'.\'))'
+                    }
+                  }
+                  description: 'Extracts structured line-level data from raw D02 records. Each line represents a material transaction with fields such as quantity, tank, temperature, and density.'
+                }
+                'Filter_array_-_Data_Header': {
+                  runAfter: {
+                    Data_Header: [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Query'
+                  inputs: {
+                    from: '@body(\'Parse_JSON_-_Validate_data\')'
+                    where: '@equals(startsWith(item(), \'D01\'),true)'
+                  }
+                }
+                'Select_-_Data_Header': {
+                  runAfter: {
+                    'Filter_array_-_Data_Header': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Select'
+                  inputs: {
+                    from: '@body(\'Filter_array_-_Data_Header\')'
+                    select: {
+                      sequenceNumber: '@int(substring(item(), 3, 10))'
+                      depot: '@substring(item(), 14, 3)'
+                      loadingDate: '@substring(item(), 17, 8)'
+                      loadingTime: '@substring(item(), 25, 6)'
+                      truckIdNumber: '@substring(item(), 31, 5)'
+                      owner: '@substring(item(), 36, 4)'
+                      materialPhysical: '@substring(item(), 40, 18)'
+                      quantity: '@decimal(replace(substring(item(), 58, 13), \',\',\'.\'))'
+                      unitForQuantity: '@substring(item(), 71, 3)'
+                      shipmentNumber: '@substring(item(), 74, 10)'
+                      quantityInStandardLiter: '@decimal(replace(substring(item(), 84, 13), \',\', \'.\'))'
+                      unitForStandardLiter: '@substring(item(), 97, 3)'
+                    }
+                  }
+                  description: 'Transforms filtered D01 header records into structured objects. Each header contains metadata like depot, loading date/time, truck ID, and shipment details.'
+                }
+                'Select_-_Sequence_Numbers': {
+                  runAfter: {
+                    'Select_-_Data_Header': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Select'
+                  inputs: {
+                    from: '@body(\'Filter_array_-_Data_Header\')'
+                    select: {
+                      sequenceNumber: '@int(substring(item(), 3, 10))'
+                    }
+                  }
+                }
+                'Filter_array_-_Tally_line': {
+                  runAfter: {
+                    Tally: [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Query'
+                  inputs: {
+                    from: '@body(\'Parse_JSON_-_Validate_data\')'
+                    where: '@equals(startsWith(item(), \'T\'),true)'
+                  }
+                }
+                'Compose_-_Tally': {
+                  runAfter: {
+                    'Filter_array_-_Tally_line': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'Compose'
+                  inputs: '@int(substring(first(body(\'Filter_array_-_Tally_line\')), 2, 17))'
+                }
+              }
+              runAfter: {
+                'Condition_-_Contain_data': [
+                  'Succeeded'
+                ]
+              }
+              type: 'Scope'
+            }
+            'Condition_-_Does_tally_match': {
+              actions: {}
+              runAfter: {
+                'Scope_-_Parse_AS400_data_to_JSON': [
+                  'Succeeded'
+                ]
+              }
+              else: {
+                actions: {
+                  'Helper-ThrowError_-_Tally_does_not_match': {
+                    type: 'Workflow'
+                    inputs: {
+                      host: {
+                        workflow: {
+                          id: childFlows.ThrowError
+                        }
+                        triggerName: 'Throw_Error'
+                      }
+                      body: {
+                        status: 500
+                        error: {
+                          message: 'Tally line of  does not match parsed data'
+                        }
+                        data: '@null'
+                      }
+                      retryPolicy: {
+                        type: 'none'
+                      }
+                    }
+                    description: 'Call the Throw Error child flow'
+                  }
+                }
+              }
+              expression: {
+                and: [
+                  {
+                    equals: [
+                      '@add(length(body(\'Filter_array_-_Data_Header\')), length(body(\'Filter_array_-_Data_Lines\')))'
+                      '@outputs(\'Compose_-_Tally\')'
+                    ]
+                  }
+                ]
+              }
+              type: 'If'
+            }
+            'For_each_-_Sequence_Number': {
+              foreach: '@sort(body(\'Select_-_Sequence_Numbers\'),\'sequenceNumber\')'
+              actions: {
+                'Filter_array_-_Data_Header_by_Sequence_Number': {
+                  type: 'Query'
+                  inputs: {
+                    from: '@body(\'Select_-_Data_Header\')'
+                    where: '@equals(item()[\'sequenceNumber\'],items(\'For_each_-_Sequence_Number\')?[\'sequenceNumber\'])'
+                  }
+                }
+                'Filter_array_-_Data_Lines_by_Sequence_Number': {
+                  type: 'Query'
+                  inputs: {
+                    from: '@body(\'Select_-_Data_Lines\')'
+                    where: '@equals(item()[\'sequenceNumber\'],items(\'For_each_-_Sequence_Number\')?[\'sequenceNumber\'])'
+                  }
+                }
+                'Create_record_(V3)_-_Accella_Transactions': {
+                  runAfter: {
+                    'Filter_array_-_Data_Header_by_Sequence_Number': [
+                      'Succeeded'
+                    ]
+                    'Filter_array_-_Data_Lines_by_Sequence_Number': [
+                      'Succeeded'
+                    ]
+                  }
+                  type: 'ApiConnection'
+                  inputs: {
+                    host: {
+                      connection: {
+                        name: '@parameters(\'$connections\')[\'dynamicssmbsaas\'][\'connectionId\']'
+                      }
+                    }
+                    method: 'post'
+                    body: {
+                    sequenceNo: '@items(\'For_each_-_Sequence_Number\')?[\'sequenceNumber\']'
+                    logicAppName: '@workflow().name'
+                    logicAppID: '@workflow().run.name'
+                    dataReceived: '@first(body(\'Select_-_File_Header\'))[\'fileCreationDateTimeUTC\']'
+                    jsonText: '@{addProperty(first(body(\'Filter_array_-_Data_Header_by_Sequence_Number\')), \'lines\', body(\'Filter_array_-_Data_Lines_by_Sequence_Number\'))}'
+                      location: '@first(body(\'Filter_array_-_Data_Header_by_Sequence_Number\'))[\'depot\']'
+                      loadingDate: '@concat(\r\n  substring(first(body(\'Filter_array_-_Data_Header_by_Sequence_Number\'))[\'loadingDate\'], 0, 4),\r\n  \'-\',\r\n  substring(first(body(\'Filter_array_-_Data_Header_by_Sequence_Number\'))[\'loadingDate\'], 4, 2),\r\n  \'-\',\r\n  substring(first(body(\'Filter_array_-_Data_Header_by_Sequence_Number\'))[\'loadingDate\'], 6, 2)\r\n)'
+                      loadingTime: '@concat(\n  substring(first(body(\'Filter_array_-_Data_Header_by_Sequence_Number\'))[\'loadingTime\'], 0, 2),\n  \':\',\n  substring(first(body(\'Filter_array_-_Data_Header_by_Sequence_Number\'))[\'loadingTime\'], 2, 2),\n  \':\',\n  substring(first(body(\'Filter_array_-_Data_Header_by_Sequence_Number\'))[\'loadingTime\'], 4, 2)\n)'
+                      vehicleNo: '@first(body(\'Filter_array_-_Data_Header_by_Sequence_Number\'))[\'truckIdNumber\']'
+                    }
+                    path: '/v3/bcenvironments/@{encodeURIComponent(encodeURIComponent(parameters(\'BC Environment Name\')))}/companies/@{encodeURIComponent(encodeURIComponent(first(body(\'Filter_array_-_Get_company_from_country\'))?[\'companyId\']))}/datasets/@{encodeURIComponent(encodeURIComponent(parameters(\'BC API Category\')))}/tables/@{encodeURIComponent(encodeURIComponent(parameters(\'BC Table Name\')))}/items'
+                  }
+                }
+              }
+              runAfter: {
+                'Condition_-_Does_tally_match': [
+                  'Succeeded'
+                ]
+              }
+              type: 'Foreach'
+            }
+            'Create_blob_(V2)_-_Create_a_copy_in_correct_folder': {
+              runAfter: {
+                'Compose_-_Archive': [
+                  'Succeeded'
+                  'Skipped'
+                ]
+                'Compose_-_Failed': [
+                  'Succeeded'
+                  'Skipped'
+                ]
+              }
+              type: 'ApiConnection'
+              inputs: {
+                host: {
+                  connection: {
+                    name: '@parameters(\'$connections\')[\'azureblob\'][\'connectionId\']'
+                  }
+                }
+                method: 'post'
+                body: '@body(\'Get_blob_content_(V2)\')'
+                headers: {
+                  ReadFileMetadataFromServer: true
+                }
+                path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(parameters(\'Blob Accella Files\')))}/files'
+                queries: {
+                  folderPath: '@{join(take(split(triggerBody()?[\'Path\'], \'/\'), 4), \'/\')}/@{coalesce(outputs(\'Compose_-_Archive\'),outputs(\'Compose_-_Failed\'))}'
+                  name: '@triggerBody()?[\'Name\']'
+                  queryParametersSingleEncoded: true
+                }
+              }
+              description: 'Uses split, take and join to get correct path of file'
+              runtimeConfiguration: {
+                contentTransfer: {
+                  transferMode: 'Chunked'
+                }
+              }
+            }
+            'Compose_-_Archive': {
+              runAfter: {
+                'For_each_-_Sequence_Number': [
+                  'Succeeded'
+                ]
+              }
+              type: 'Compose'
+              inputs: 'archive'
+            }
+            'Compose_-_Failed': {
+              runAfter: {
+                'For_each_-_Sequence_Number': [
+                  'Failed'
+                  'TimedOut'
+                ]
+              }
+              type: 'Compose'
+              inputs: 'failed'
+            }
+            'Delete_blob_-_Delete_Original': {
+              runAfter: {
+                'Create_blob_(V2)_-_Create_a_copy_in_correct_folder': [
+                  'Succeeded'
+                ]
+              }
+              type: 'ApiConnection'
+              inputs: {
+                host: {
+                  connection: {
+                    name: '@parameters(\'$connections\')[\'azureblob\'][\'connectionId\']'
+                  }
+                }
+                method: 'delete'
+                headers: {
+                  SkipDeleteIfFileNotFoundOnServer: false
+                }
+                path: '/v2/datasets/@{encodeURIComponent(encodeURIComponent(parameters(\'Blob Accella Files\')))}/files/@{encodeURIComponent(encodeURIComponent(triggerBody()?[\'Id\']))}'
+              }
+            }
+          }
+          runAfter: {}
+          type: 'Scope'
+        }
+        Catch: {
+          actions: {
+            'Helper-GetErrorMessage': {
+              type: 'Workflow'
+              inputs: {
+                host: {
+                  workflow: {
+                    id: childFlows.GetErrorMessage
+                  }
+                  triggerName: 'Get_Error_Message'
+                }
+              }
+            }
+          }
+          runAfter: {
+            Try: [
+              'TimedOut'
+              'Failed'
+            ]
+          }
+          type: 'Scope'
+        }
+        Finally: {
+          actions: {
+            'Condition_-_Was_Try_Successful': {
+              actions: {
+                'Response_-_OK': {
+                  type: 'Response'
+                  kind: 'Http'
+                  inputs: {
+                    statusCode: 200
+                  }
+                }
+              }
+              else: {
+                actions: {
+                  'Helper-SendNotification': {
+                    type: 'Workflow'
+                    inputs: {
+                      host: {
+                        workflow: {
+                          id: childFlows.SendNotification
+                        }
+                        triggerName: 'Send_Notification'
+                      }
+                    }
+                  }
+                  Response: {
+                    runAfter: {
+                      'Helper-SendNotification': [
+                        'Succeeded'
+                      ]
+                    }
+                    type: 'Response'
+                    kind: 'Http'
+                    inputs: {
+                      statusCode: 500
+                    }
+                  }
+                }
+              }
+              expression: {
+                and: [
+                  {
+                    equals: [
+                      '@actions(\'Try\')[\'status\']'
+                      'Succeeded'
+                    ]
+                  }
+                  {
+                    equals: [
+                      '@toUpper(coalesce(outputs(\'Compose_-_Archive\'),outputs(\'Compose_-_Failed\')))'
+                      'ARCHIVE'
+                    ]
+                  }
+                ]
+              }
+              type: 'If'
+            }
+          }
+          runAfter: {
+            Catch: [
+              'Skipped'
+              'Failed'
+              'TimedOut'
+              'Succeeded'
+            ]
+          }
+          type: 'Scope'
+        }
+      }
+      outputs: {}
+    }
+    parameters: {
+      '$connections': {
+        value: {
+          azureblob: {
+            id: connections.azureBlob.id
+            connectionId: connections.azureBlob.connectionId
+            connectionName: 'azureblob'
+          }
+          dynamicssmbsaas: {
+            id: connections.businessCentral.id
+            connectionId: connections.businessCentral.connectionId
+            connectionName: 'dynamicssmbsaas'
+          }
+        }
+      }
+    }
+  }
+}

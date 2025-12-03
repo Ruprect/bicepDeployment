@@ -157,8 +157,12 @@ class DeploymentManager:
                 if not is_valid:
                     error_msg = f"Template validation failed: {validation_message}"
                     logger.log(error_msg, LogLevel.ERROR, Color.RED)
+                    self.bicep_manager.update_validation_history(template_file, False, validation_message)
                     self.bicep_manager.update_deployment_history(template_file, False, error_msg)
                     return False
+                else:
+                    # Record successful validation
+                    self.bicep_manager.update_validation_history(template_file, True)
             
             # Deploy template
             def deploy():

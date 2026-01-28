@@ -51,13 +51,12 @@ parameters.*.json
 # Temporary files
 *.tmp
 *.temp
+tmpclaude*
 
-<<<<<<< HEAD
 # Claude Code artifacts
 .claude/
 claude.md
 CLAUDE.md
-=======
+
 # Not ready for commit
 vscode-extension
->>>>>>> 7bfdc49 (Updated gitignore)

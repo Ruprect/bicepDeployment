@@ -103,7 +103,11 @@ class DeployScript:
                     
                 elif choice.isdigit():
                     self._handle_deploy_individual(templates, int(choice))
-                    
+
+                elif '-' in choice or ',' in choice:
+                    # Handle range or list input (e.g., "1-3,5,10-15")
+                    self._handle_deploy_range(templates, choice)
+
                 else:
                     logger.log("Invalid choice. Please try again.", LogLevel.ERROR, Color.RED)
                     # Continue without waiting
@@ -182,7 +186,7 @@ class DeployScript:
     def _handle_select_parameter_file(self):
         """Handle parameter file selection."""
         parameter_files = self.config_manager.get_parameter_files()
-        selected_file = self.menu_system.show_parameter_file_menu(parameter_files)
+        selected_file = self.menu_system.show_parameter_file_menu(parameter_files, self.selected_parameter_file)
         
         if selected_file:
             self.selected_parameter_file = selected_file
@@ -203,7 +207,234 @@ class DeployScript:
         """Handle refreshing the template file list."""
         count = self.bicep_manager.refresh_file_list()
         logger.log(f"File list refreshed. Found {count} template(s).", LogLevel.INFO, Color.GREEN)
+
+    def _parse_template_range(self, range_input: str, max_templates: int) -> list:
+        """Parse a range input like '1-3,5,10-15' and return a list of template numbers.
+
+        Args:
+            range_input: String containing template numbers and ranges (e.g., "1-3,5,10-15")
+            max_templates: Maximum valid template number
+
+        Returns:
+            List of template numbers, or empty list if invalid
+        """
+        template_numbers = []
+
+        try:
+            # Split by comma to get individual numbers or ranges
+            parts = range_input.split(',')
+
+            for part in parts:
+                part = part.strip()
+
+                if '-' in part:
+                    # Handle range (e.g., "1-3" or "10-15")
+                    range_parts = part.split('-')
+                    if len(range_parts) != 2:
+                        logger.log(f"Invalid range format: {part}", LogLevel.ERROR, Color.RED)
+                        return []
+
+                    start = int(range_parts[0].strip())
+                    end = int(range_parts[1].strip())
+
+                    if start > end:
+                        logger.log(f"Invalid range {part}: start must be <= end", LogLevel.ERROR, Color.RED)
+                        return []
+
+                    if start < 1 or end > max_templates:
+                        logger.log(f"Range {part} is out of bounds (1-{max_templates})", LogLevel.ERROR, Color.RED)
+                        return []
+
+                    # Add all numbers in the range
+                    template_numbers.extend(range(start, end + 1))
+                else:
+                    # Handle single number
+                    num = int(part)
+                    if num < 1 or num > max_templates:
+                        logger.log(f"Template number {num} is out of bounds (1-{max_templates})", LogLevel.ERROR, Color.RED)
+                        return []
+                    template_numbers.append(num)
+
+            # Remove duplicates and sort
+            template_numbers = sorted(set(template_numbers))
+            return template_numbers
+
+        except ValueError as e:
+            logger.log(f"Invalid input format: {e}", LogLevel.ERROR, Color.RED)
+            return []
     
+    def _handle_deploy_range(self, templates, range_input: str):
+        """Handle deployment of multiple templates specified by range.
+
+        Args:
+            templates: List of available templates
+            range_input: Range string like "1-3,5,10-15"
+        """
+        if not templates:
+            logger.log("No templates available", LogLevel.ERROR, Color.RED)
+            return
+
+        # Parse the range input
+        template_numbers = self._parse_template_range(range_input, len(templates))
+
+        if not template_numbers:
+            # Error already logged by parse method
+            return
+
+        # Filter to get only enabled templates
+        selected_templates = []
+        disabled_templates = []
+        empty_templates = []
+
+        for num in template_numbers:
+            template = templates[num - 1]
+            if template.size == 0:
+                empty_templates.append(template.name)
+            elif not template.enabled:
+                disabled_templates.append(template.name)
+            else:
+                selected_templates.append((num, template))
+
+        # Show what will be deployed
+        logger.log(f"\n📋 Templates to deploy: {len(selected_templates)}", LogLevel.INFO, Color.CYAN)
+        for num, template in selected_templates:
+            logger.log(f"  {num}. {template.name}", LogLevel.INFO, Color.WHITE)
+
+        # Warn about skipped templates
+        if disabled_templates:
+            logger.log(f"\n⚠️  Skipping {len(disabled_templates)} disabled template(s):", LogLevel.WARN, Color.YELLOW)
+            for name in disabled_templates:
+                logger.log(f"  - {name}", LogLevel.WARN, Color.YELLOW)
+
+        if empty_templates:
+            logger.log(f"\n⚠️  Skipping {len(empty_templates)} empty template(s):", LogLevel.WARN, Color.YELLOW)
+            for name in empty_templates:
+                logger.log(f"  - {name}", LogLevel.WARN, Color.YELLOW)
+
+        if not selected_templates:
+            logger.log("\nNo valid templates to deploy", LogLevel.ERROR, Color.RED)
+            return
+
+        # Ask for confirmation (Y is default)
+        print()
+        confirm = input(f"Deploy {len(selected_templates)} template(s)? [{Color.GREEN}Y{Color.RESET}]es / [N]o (default: Yes): ").strip().upper()
+        if not confirm:  # Empty input means default (Y)
+            confirm = "Y"
+        if confirm != "Y":
+            logger.log("Deployment cancelled", LogLevel.INFO, Color.YELLOW)
+            return
+
+        # Ask once how to handle unchanged templates (D is default)
+        print()
+        logger.log("How should unchanged templates be handled?", LogLevel.INFO, Color.CYAN)
+        print("  [S] Skip unchanged templates")
+        print(f"  [{Color.GREEN}D{Color.RESET}] Deploy all templates even if unchanged (default)")
+        print("  [P] Prompt for each unchanged template")
+        print()
+        unchanged_choice = input(f"Choose option [S/{Color.GREEN}D{Color.RESET}/P] (default: Deploy all): ").strip().upper()
+
+        if not unchanged_choice:  # Empty input means default (D)
+            unchanged_choice = "D"
+
+        if unchanged_choice == "S":
+            prompt_mode = "skip"
+            logger.log("Will skip unchanged templates", LogLevel.INFO, Color.YELLOW)
+        elif unchanged_choice == "D":
+            prompt_mode = "deploy"
+            logger.log("Will deploy all templates", LogLevel.INFO, Color.CYAN)
+        elif unchanged_choice == "P":
+            prompt_mode = "prompt"
+            logger.log("Will prompt for each unchanged template", LogLevel.INFO, Color.CYAN)
+        else:
+            # Default to deploy if invalid input
+            prompt_mode = "deploy"
+            logger.log("Invalid choice, defaulting to deploy all templates", LogLevel.WARN, Color.YELLOW)
+
+        # Get deployment mode (Complete only allowed for first template)
+        first_template_num = template_numbers[0]
+        if first_template_num == 1:
+            mode = self.deployment_manager.get_deployment_mode()
+            if mode is None:
+                return  # User chose to quit
+        else:
+            mode = "Incremental"
+            logger.log("Using Incremental mode (Complete mode only available when deploying from template 1)", LogLevel.INFO, Color.YELLOW)
+
+        # Create validation mode description
+        validation_desc = ""
+        if self.validation_mode == "All":
+            validation_desc = "validating all templates"
+        elif self.validation_mode == "Changed":
+            validation_desc = "validating only changed templates"
+        else:  # Skip
+            validation_desc = "skipping validation"
+
+        # Global deployment header
+        logger.log(f"\n🚀 Deploying {len(selected_templates)} template(s) as {Color.CYAN}{mode}{Color.RESET}, {Color.YELLOW}{validation_desc}{Color.RESET}.\n", LogLevel.INFO, Color.WHITE)
+
+        # Deploy each template
+        successful = 0
+        failed = 0
+        skipped = 0
+
+        for i, (num, template) in enumerate(selected_templates, 1):
+            # Template header
+            logger.log(f"{Color.CYAN}▶{Color.RESET} [{i}/{len(selected_templates)}] Template: {Color.CYAN}{template.name}{Color.RESET}", LogLevel.INFO, Color.WHITE)
+
+            # Deploy
+            deploy_result = self.deployment_manager.deploy_bicep_template(
+                template.file,
+                mode,
+                template.name,
+                self.get_effective_resource_group(),
+                self.selected_parameter_file,
+                prompt_mode,
+                skip_validation=False,
+                validation_mode=self.validation_mode,
+                template_needs_redeployment=template.needs_redeployment
+            )
+
+            # Track results
+            if deploy_result is True:
+                successful += 1
+            elif deploy_result == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+                # Ask user if they want to continue
+                logger.log(f"\n⚠️  Deployment failed for: {template.name}", LogLevel.ERROR, Color.RED)
+
+                if i < len(selected_templates):  # Not the last template
+                    print()
+                    continue_choice = input("Continue with remaining templates? [Y]es / [N]o: ").upper()
+                    if continue_choice != "Y":
+                        logger.log("Deployment sequence stopped by user", LogLevel.INFO, Color.YELLOW)
+                        break
+
+            print()  # Add spacing between templates
+
+        # Summary
+        logger.log("=" * 80, LogLevel.INFO, Color.CYAN)
+        logger.log(f"📊 Deployment Summary:", LogLevel.INFO, Color.WHITE)
+        logger.log(f"  ✅ Successful: {successful}", LogLevel.SUCCESS, Color.GREEN)
+        if skipped > 0:
+            logger.log(f"  ⏭️  Skipped: {skipped}", LogLevel.INFO, Color.YELLOW)
+        if failed > 0:
+            logger.log(f"  ❌ Failed: {failed}", LogLevel.ERROR, Color.RED)
+        logger.log("=" * 80, LogLevel.INFO, Color.CYAN)
+
+        # Set deployment result for menu display
+        if failed == 0:
+            self.menu_system.last_deployment_result = {
+                "Status": "Success",
+                "Message": f"{successful} template(s) deployed successfully"
+            }
+        else:
+            self.menu_system.last_deployment_result = {
+                "Status": "Failed",
+                "Message": f"{failed} failed, {successful} succeeded"
+            }
+
     def _handle_deploy_individual(self, templates, template_num):
         """Handle deployment of an individual template."""
         if not templates or template_num < 1 or template_num > len(templates):

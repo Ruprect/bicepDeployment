@@ -320,7 +320,7 @@ class MenuSystem:
         # Build options menu
         options = []
         if templates:
-            options.append(f"1-{len(templates)} Deploy template")
+            options.append(f"1-{len(templates)} or range Deploy template(s)")
         
         # Import Color class for validation mode colors
         from .logger import Color
@@ -351,6 +351,10 @@ class MenuSystem:
         for line in menu_lines:
             print(line)
         print(separator)
+
+        # Show example for range input if there are templates
+        if templates:
+            print(f"{Color.GRAY}💡 Tip: Deploy multiple templates using ranges (e.g., 1-3,5,10-15){Color.RESET}")
     
     def show_reorder_menu(self, templates: List[BicepTemplate]) -> List[str]:
         """Show template reordering interface with arrow key navigation."""
@@ -474,22 +478,29 @@ class MenuSystem:
                     return [t.name for t in templates]  # Return original order
     
     
-    def show_parameter_file_menu(self, parameter_files: List[Path]) -> Optional[Path]:
+    def show_parameter_file_menu(self, parameter_files: List[Path], current_file: Optional[Path] = None) -> Optional[Path]:
         """Show parameter file selection menu."""
         if not parameter_files:
             logger.log("No parameter files found", LogLevel.WARN, Color.YELLOW)
             return None
-        
+
         self.clear_screen()
         print(self._get_separator())
         print("    PARAMETER FILE SELECTION")
         print(self._get_separator())
-        
+
+        if current_file:
+            print(f"\n{Color.GREEN}Currently selected: {current_file.name}{Color.RESET}")
+
         print("\nAvailable parameter files:")
         for i, param_file in enumerate(parameter_files, 1):
             size_kb = param_file.stat().st_size // 1024
-            print(f"  {i}. {param_file.name} ({size_kb} KB)")
-        
+            # Highlight currently selected file in green
+            if current_file and param_file.name == current_file.name:
+                print(f"  {Color.GREEN}{i}. {param_file.name} ({size_kb} KB){Color.RESET}")
+            else:
+                print(f"  {i}. {param_file.name} ({size_kb} KB)")
+
         print(f"  {len(parameter_files) + 1}. None (no parameter file)")
         
         # Build options menu using the same format as main menu
@@ -514,9 +525,19 @@ class MenuSystem:
         
         while True:
             try:
-                choice = input(f"\nSelect parameter file (1-{len(parameter_files) + 1}): ")
-                choice_num = int(choice)
-                
+                choice_input = input(f"\nSelect parameter file (1-{len(parameter_files) + 1}, or press Enter to keep current): ").strip()
+
+                # If empty input and there's a current selection, keep it
+                if not choice_input:
+                    if current_file:
+                        logger.log(f"Keeping current parameter file: {current_file.name}", LogLevel.INFO, Color.CYAN)
+                        return current_file
+                    else:
+                        logger.log("No parameter file selected", LogLevel.INFO, Color.YELLOW)
+                        return None
+
+                choice_num = int(choice_input)
+
                 if 1 <= choice_num <= len(parameter_files):
                     selected_file = parameter_files[choice_num - 1]
                     logger.log(f"Selected parameter file: {selected_file.name}", LogLevel.SUCCESS, Color.GREEN)
@@ -526,13 +547,44 @@ class MenuSystem:
                     return None
                 else:
                     logger.log("Invalid choice", LogLevel.ERROR, Color.RED)
-                    
+
             except ValueError:
                 logger.log("Please enter a valid number", LogLevel.ERROR, Color.RED)
     
+    def _get_azure_status_cached(self) -> dict:
+        """Get Azure status information once and cache it to avoid repeated slow CLI calls.
+
+        Returns:
+            dict: Dictionary with formatted status strings for display
+        """
+        cli_status = ""
+        login_status = ""
+        subscription_status = ""
+
+        if not self.azure_client.is_azure_cli_available():
+            cli_status = "❌ Azure CLI not installed or not in PATH"
+            login_status = "🔐 Currently logged in to: Unknown"
+            subscription_status = "📊 Active Subscription: None"
+        else:
+            cli_status = "✅ Azure CLI is available"
+            tenant_info = self.azure_client.get_current_azure_tenant_info()
+            if tenant_info:
+                login_status = f"🔐 Currently logged in to: {tenant_info['displayName']}"
+                subscription_status = f"📊 Active Subscription: {tenant_info['subscriptionName']}"
+            else:
+                login_status = "🔐 Currently logged in to: Unknown"
+                subscription_status = "📊 Active Subscription: None"
+
+        return {
+            'cli_status': cli_status,
+            'login_status': login_status,
+            'subscription_status': subscription_status
+        }
+
     def show_configuration_menu(self):
-        """Show configuration management menu with arrow selection."""
+        """Show configuration management menu with arrow selection and keyboard shortcuts."""
         config_items = [
+<<<<<<< HEAD
             {"name": "Set Tenant", "key": "T", "action": self._handle_tenant_selection},
             {"name": "Validate Login", "key": "V", "action": self._handle_validate_login},
             {"name": "Login", "key": "L", "action": self._handle_azure_login},
@@ -542,50 +594,78 @@ class MenuSystem:
             {"name": "Console Width", "key": "W", "action": self._handle_console_width_configuration},
             {"name": "Refresh Azure Status", "key": "F", "action": self._handle_refresh_azure_status},
             {"name": "Back to Main Menu", "key": "Q", "action": None}
+=======
+            {"name": "[T] Set tenant", "key": "T", "action": self._handle_tenant_selection},
+            {"name": "[V] Validate login", "key": "V", "action": self._handle_validate_login},
+            {"name": "[L] Login to Azure", "key": "L", "action": self._handle_azure_login},
+            {"name": "[P] Set Chrome profile", "key": "P", "action": self._handle_chrome_profile_selection},
+            {"name": "[S] Set subscription", "key": "S", "action": self._handle_subscription_selection},
+            {"name": "[R] Change Resource Group", "key": "R", "action": self._handle_resource_group_selection},
+            {"name": "[W] Configure console width", "key": "W", "action": self._handle_console_width_configuration},
+            {"name": "[Q] Back to main menu", "key": "Q", "action": None}
+>>>>>>> 9fac298 (Enhance deployment script UX with range deployment and improved configuration menu)
         ]
-        
+
         current_selection = 0
-        
+
+        # Show loading message before checking Azure status
+        self.clear_screen()
+        console_width = self._get_console_width()
+        separator = "=" * console_width
+        header = "AZURE CONFIGURATION"
+        padding = (console_width - len(header)) // 2
+        centered_header = " " * padding + header
+
+        print(separator)
+        print(centered_header)
+        print(separator)
+        print(f"\n{Color.CYAN}⏳ Loading Azure configuration status...{Color.RESET}")
+        print(f"{Color.YELLOW}This may take a few seconds...{Color.RESET}")
+
+        # Cache Azure status once when entering the menu to avoid repeated slow CLI calls
+        azure_status_cached = self._get_azure_status_cached()
+
         while True:
             self.clear_screen()
             console_width = self._get_console_width()
             separator = "=" * console_width
-            
+
             # Center the header
             header = "AZURE CONFIGURATION"
             padding = (console_width - len(header)) // 2
             centered_header = " " * padding + header
-            
+
             print(separator)
             print(centered_header)
             print(separator)
-            
+
             # Display current settings
             print("\nCurrent Settings:")
             settings = self.config_manager.load_deployment_settings()
-            
+
             # Tenant
             tenant_id = self.config_manager.get_desired_tenant()
             print(f"  Tenant: {tenant_id if tenant_id else 'Not set'}")
-            
+
             # Chrome Profile
             chrome_profile = self.config_manager.get_chrome_profile()
             print(f"  Chrome profile: {chrome_profile if chrome_profile else 'Default'}")
-            
+
             # Subscription
             subscription = self.config_manager.get_subscription()
             print(f"  Subscription: {subscription if subscription else 'Not set'}")
-            
+
             # Resource Group
             resource_group = self.config_manager.get_resource_group()
             print(f"  Resource Group: {resource_group if resource_group else 'Using default'}")
-            
+
             # Console Width
             console_width_value = self.config_manager.get_console_width()
             print(f"  Console Width: {console_width_value} characters")
-            
-            # Azure CLI status
+
+            # Azure CLI status - use cached version
             print("\n" + "=" * 50)
+<<<<<<< HEAD
             if not self.azure_client.is_azure_cli_available():
                 print("❌ Azure CLI not installed or not in PATH")
                 print("🔐 Currently logged in to: Unknown")
@@ -622,11 +702,35 @@ class MenuSystem:
             for line in menu_lines:
                 print(line)
             
+=======
+            print(azure_status_cached['cli_status'])
+            print(azure_status_cached['login_status'])
+            print(azure_status_cached['subscription_status'])
+
+            # Display configuration options with arrow navigation and keyboard shortcuts
+            print(f"\n{separator}")
+            print("Configuration Options (↑↓ arrows + ENTER, or press key shortcut):")
+            print()
+
+            for i, item in enumerate(config_items):
+                # The name already includes the [KEY] prefix, just colorize it
+                name = item['name']
+
+                # Apply colorization to the option text (cyan for [key], white for rest)
+                colored_option = self._colorize_option(name)
+
+                if i == current_selection:
+                    # For selected item, add arrow and maintain the existing coloring
+                    print(f"{Color.CYAN}→{Color.RESET} {colored_option}")
+                else:
+                    print(f"  {colored_option}")
+
+>>>>>>> 9fac298 (Enhance deployment script UX with range deployment and improved configuration menu)
             print(f"{separator}")
-            
+
             # Get key input
             key = self._get_key()
-            
+
             if key == 'UP':
                 if current_selection > 0:
                     current_selection -= 1
@@ -637,17 +741,33 @@ class MenuSystem:
                 selected_item = config_items[current_selection]
                 if selected_item['action']:
                     selected_item['action']()
+                    # Refresh Azure status cache after actions that might change it
+                    if selected_item['key'] in ['V', 'L', 'S']:
+                        azure_status_cached = self._get_azure_status_cached()
                 else:  # Back to Main Menu
                     return
             elif key == 'Q':
                 return
             else:
+<<<<<<< HEAD
                 # Handle direct key selection
                 for item in config_items:
                     if key == item['key']:
                         if item['action']:
                             item['action']()
                         else:  # Back to Main Menu
+=======
+                # Check if key matches any shortcut
+                for i, item in enumerate(config_items):
+                    if key == item['key']:
+                        current_selection = i
+                        if item['action']:
+                            item['action']()
+                            # Refresh Azure status cache after actions that might change it
+                            if item['key'] in ['V', 'L', 'S']:
+                                azure_status_cached = self._get_azure_status_cached()
+                        else:  # Back to Main Menu (Q)
+>>>>>>> 9fac298 (Enhance deployment script UX with range deployment and improved configuration menu)
                             return
                         break
     
@@ -729,16 +849,12 @@ class MenuSystem:
     
     def _handle_subscription_selection(self):
         """Handle subscription selection."""
-        subscriptions = self.azure_client.get_azure_subscriptions()
-        
-        if not subscriptions:
-            logger.log("No subscriptions found", LogLevel.ERROR, Color.RED)
-            return
-        
+        # Show loading message
         self.clear_screen()
         print(self._get_separator())
         print("    SUBSCRIPTION SELECTION")
         print(self._get_separator())
+<<<<<<< HEAD
         
         # Show current subscription
         current_sub = self.config_manager.get_subscription()
@@ -762,8 +878,53 @@ class MenuSystem:
                 print(f"       {Color.GRAY}🆔 Subscription ID: {sub.subscription_id}{Color.RESET}")
             print()
         
+=======
+        print(f"\n{Color.CYAN}⏳ Loading subscriptions...{Color.RESET}")
+
+        subscriptions = self.azure_client.get_azure_subscriptions()
+
+        if not subscriptions:
+            logger.log("No subscriptions found", LogLevel.ERROR, Color.RED)
+            return
+
+        # Get currently selected subscription
+        current_sub = self.config_manager.get_subscription()
+
+        self.clear_screen()
+        print(self._get_separator())
+        print("    SUBSCRIPTION SELECTION")
+        print(self._get_separator())
+
+        if current_sub:
+            # Find the subscription name for the current ID
+            current_sub_name = next((sub.name for sub in subscriptions if sub.subscription_id == current_sub), None)
+            if current_sub_name:
+                print(f"\n{Color.GREEN}Currently selected: {current_sub_name}{Color.RESET}")
+
+        print("\nAvailable subscriptions:")
+        for i, sub in enumerate(subscriptions, 1):
+            # Mark the currently selected subscription with green color
+            if current_sub and sub.subscription_id == current_sub:
+                print(f"  {Color.GREEN}{i}. {sub.name} ({sub.state}){Color.RESET}")
+                print(f"     {Color.GREEN}ID: {sub.subscription_id}{Color.RESET}")
+            else:
+                print(f"  {i}. {sub.name} ({sub.state})")
+                print(f"     ID: {sub.subscription_id}")
+
+>>>>>>> 9fac298 (Enhance deployment script UX with range deployment and improved configuration menu)
         try:
-            choice = int(input(f"\nSelect subscription (1-{len(subscriptions)}): ")) - 1
+            choice_input = input(f"\nSelect subscription (1-{len(subscriptions)}, or press Enter to keep current): ").strip()
+
+            # If empty input and there's a current selection, keep it
+            if not choice_input:
+                if current_sub:
+                    current_sub_name = next((sub.name for sub in subscriptions if sub.subscription_id == current_sub), "Unknown")
+                    logger.log(f"Keeping current subscription: {current_sub_name}", LogLevel.INFO, Color.CYAN)
+                else:
+                    logger.log("No subscription selected", LogLevel.WARN, Color.YELLOW)
+                return
+
+            choice = int(choice_input) - 1
             if 0 <= choice < len(subscriptions):
                 selected_sub = subscriptions[choice]
                 if self.azure_client.set_subscription(selected_sub.subscription_id):
@@ -785,23 +946,50 @@ class MenuSystem:
     
     def _handle_resource_group_selection(self):
         """Handle resource group selection."""
-        resource_groups = self.azure_client.get_azure_resource_groups()
-        
-        if not resource_groups:
-            logger.log("No resource groups found", LogLevel.ERROR, Color.RED)
-            return
-        
+        # Show loading message
         self.clear_screen()
         print(self._get_separator())
         print("    RESOURCE GROUP SELECTION")
         print(self._get_separator())
-        
+        print(f"\n{Color.CYAN}⏳ Loading resource groups...{Color.RESET}")
+
+        resource_groups = self.azure_client.get_azure_resource_groups()
+
+        if not resource_groups:
+            logger.log("No resource groups found", LogLevel.ERROR, Color.RED)
+            return
+
+        # Get currently selected resource group
+        current_rg = self.config_manager.get_resource_group()
+
+        self.clear_screen()
+        print(self._get_separator())
+        print("    RESOURCE GROUP SELECTION")
+        print(self._get_separator())
+
+        if current_rg:
+            print(f"\n{Color.GREEN}Currently selected: {current_rg}{Color.RESET}")
+
         print("\nAvailable resource groups:")
         for i, rg in enumerate(resource_groups, 1):
-            print(f"  {i}. {rg.name} ({rg.location}) - {rg.provisioning_state}")
-        
+            # Mark the currently selected resource group with green color
+            if current_rg and rg.name == current_rg:
+                print(f"  {Color.GREEN}{i}. {rg.name} ({rg.location}){Color.RESET}")
+            else:
+                print(f"  {i}. {rg.name} ({rg.location})")
+
         try:
-            choice = int(input(f"\nSelect resource group (1-{len(resource_groups)}): ")) - 1
+            choice_input = input(f"\nSelect resource group (1-{len(resource_groups)}, or press Enter to keep current): ").strip()
+
+            # If empty input and there's a current selection, keep it
+            if not choice_input:
+                if current_rg:
+                    logger.log(f"Keeping current resource group: {current_rg}", LogLevel.INFO, Color.CYAN)
+                else:
+                    logger.log("No resource group selected", LogLevel.WARN, Color.YELLOW)
+                return
+
+            choice = int(choice_input) - 1
             if 0 <= choice < len(resource_groups):
                 selected_rg = resource_groups[choice]
                 self.config_manager.set_resource_group(selected_rg.name)

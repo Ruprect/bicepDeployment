@@ -173,8 +173,17 @@ function Invoke-Branch2B {
             for ($i = 0; $i -lt $workspaceFiles.Count; $i++) {
                 Write-Host "  [$($i+1)] $($workspaceFiles[$i].Name)" -ForegroundColor White
             }
-            $sel = Read-Host "  Select [1-$($workspaceFiles.Count)]"
-            $workspaceFile = $workspaceFiles[[int]$sel - 1].FullName
+            $sel = $null
+            do {
+                $selInput = Read-Host "  Select [1-$($workspaceFiles.Count)]"
+                $parsed = 0
+                if ([int]::TryParse($selInput, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le $workspaceFiles.Count) {
+                    $sel = $parsed
+                } else {
+                    Write-Host "  Please enter a number between 1 and $($workspaceFiles.Count)." -ForegroundColor Red
+                }
+            } while ($null -eq $sel)
+            $workspaceFile = $workspaceFiles[$sel - 1].FullName
         }
 
         $ws = Get-Content $workspaceFile -Raw | ConvertFrom-Json

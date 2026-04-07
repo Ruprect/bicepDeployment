@@ -13,9 +13,11 @@ function Read-WithDefault {
 }
 
 function Read-Required {
-    param([string]$Prompt)
+    param([string]$Prompt, [string]$Default = "")
     do {
-        $value = Read-Host "  $Prompt"
+        $display = if ($Default) { "$Prompt [$Default]" } else { $Prompt }
+        $value = Read-Host "  $display"
+        if ([string]::IsNullOrWhiteSpace($value)) { $value = $Default }
         if ([string]::IsNullOrWhiteSpace($value)) {
             Write-Host "  This field is required." -ForegroundColor Red
         }
@@ -85,13 +87,9 @@ function Invoke-Mode1 {
     $settings     = Get-DeploymentSettings -Path $settingsPath
     $cfg          = $settings.Configuration
 
-    $rg  = if ($cfg.ResourceGroup)  { " [$($cfg.ResourceGroup)]" }  else { " (required)" }
-    $sub = if ($cfg.Subscription)   { " [$($cfg.Subscription)]" }   else { " (required)" }
-    $ten = if ($cfg.DesiredTenant)  { " [$($cfg.DesiredTenant)]" }  else { " (required)" }
-
-    $cfg.ResourceGroup = Read-Required -Prompt "Resource group name$rg"
-    $cfg.Subscription  = Read-Required -Prompt "Subscription ID$sub"
-    $cfg.DesiredTenant = Read-Required -Prompt "Tenant ID$ten"
+    $cfg.ResourceGroup = Read-Required -Prompt "Resource group name" -Default $cfg.ResourceGroup
+    $cfg.Subscription  = Read-Required -Prompt "Subscription ID"     -Default $cfg.Subscription
+    $cfg.DesiredTenant = Read-Required -Prompt "Tenant ID"           -Default $cfg.DesiredTenant
 
     Write-Host ""
     Write-Host "  Validation mode:" -ForegroundColor White
@@ -208,9 +206,12 @@ function Invoke-Mode2 {
                 if ($countries.Count -le 1) {
                     Write-Host "  Must keep at least one country." -ForegroundColor Red
                 } else {
-                    [int]$idx = (Read-Host "  Remove number") - 1
-                    if ($idx -ge 0 -and $idx -lt $countries.Count) {
-                        $countries.RemoveAt($idx)
+                    $removeInput = Read-Host "  Remove number"
+                    $removeNum = 0
+                    if (-not [int]::TryParse($removeInput, [ref]$removeNum) -or $removeNum -lt 1 -or $removeNum -gt $countries.Count) {
+                        Write-Host "  Invalid number." -ForegroundColor Red
+                    } else {
+                        $countries.RemoveAt($removeNum - 1)
                     }
                 }
             }

@@ -26,7 +26,7 @@ Describe "Get-DeploymentSettings" {
     }
 
     It "preserves FileOrder from existing file" {
-        $tmpFile = Join-Path $env:TEMP "test-settings-$(New-Guid).json"
+        $tmpFile = Join-Path $env:TEMP "test-settings-$([System.Guid]::NewGuid()).json"
         [PSCustomObject]@{
             FileOrder     = @([PSCustomObject]@{ FileName = "test.bicep" })
             Configuration = [PSCustomObject]@{ ResourceGroup = "rg"; ValidationMode = "All"; ConsoleWidth = 75 }
@@ -39,7 +39,7 @@ Describe "Get-DeploymentSettings" {
     }
 
     It "fills missing Configuration keys with defaults" {
-        $tmpFile = Join-Path $env:TEMP "test-settings-$(New-Guid).json"
+        $tmpFile = Join-Path $env:TEMP "test-settings-$([System.Guid]::NewGuid()).json"
         [PSCustomObject]@{
             FileOrder     = @()
             Configuration = [PSCustomObject]@{ ResourceGroup = "myRg" }

@@ -6,7 +6,7 @@ BeforeAll {
 
 Describe "Test-IsToolRoot" {
     It "returns true when deployScript/main.py exists" {
-        $tmpDir = Join-Path $env:TEMP "bicep-test-$(New-Guid)"
+        $tmpDir = Join-Path $env:TEMP "bicep-test-$([System.Guid]::NewGuid())"
         New-Item -ItemType Directory -Path "$tmpDir\deployScript" -Force | Out-Null
         New-Item -ItemType File     -Path "$tmpDir\deployScript\main.py" -Force | Out-Null
         Test-IsToolRoot -Path $tmpDir | Should -BeTrue
@@ -14,7 +14,7 @@ Describe "Test-IsToolRoot" {
     }
 
     It "returns false when deployScript/main.py does not exist" {
-        $tmpDir = Join-Path $env:TEMP "bicep-test-$(New-Guid)"
+        $tmpDir = Join-Path $env:TEMP "bicep-test-$([System.Guid]::NewGuid())"
         New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         Test-IsToolRoot -Path $tmpDir | Should -BeFalse
         Remove-Item -Recurse -Force $tmpDir
@@ -54,7 +54,7 @@ Describe "Test-WorkspaceReferencesBicep" {
 
 Describe "Add-GitIgnoreEntry" {
     It "creates .gitignore with entry when file does not exist" {
-        $tmpDir = Join-Path $env:TEMP "bicep-test-$(New-Guid)"
+        $tmpDir = Join-Path $env:TEMP "bicep-test-$([System.Guid]::NewGuid())"
         New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         Add-GitIgnoreEntry -ProjectPath $tmpDir -Entry "parameters.*.json"
         $content = Get-Content (Join-Path $tmpDir ".gitignore") -Raw
@@ -63,7 +63,7 @@ Describe "Add-GitIgnoreEntry" {
     }
 
     It "appends entry when .gitignore exists but does not contain it" {
-        $tmpDir = Join-Path $env:TEMP "bicep-test-$(New-Guid)"
+        $tmpDir = Join-Path $env:TEMP "bicep-test-$([System.Guid]::NewGuid())"
         New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         Set-Content (Join-Path $tmpDir ".gitignore") "*.log"
         Add-GitIgnoreEntry -ProjectPath $tmpDir -Entry "parameters.*.json"
@@ -73,7 +73,7 @@ Describe "Add-GitIgnoreEntry" {
     }
 
     It "does not duplicate entry when already present" {
-        $tmpDir = Join-Path $env:TEMP "bicep-test-$(New-Guid)"
+        $tmpDir = Join-Path $env:TEMP "bicep-test-$([System.Guid]::NewGuid())"
         New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         Set-Content (Join-Path $tmpDir ".gitignore") "parameters.*.json"
         Add-GitIgnoreEntry -ProjectPath $tmpDir -Entry "parameters.*.json"

@@ -151,6 +151,11 @@ function Invoke-Mode2 {
     Write-Host "  Parameters File Setup" -ForegroundColor Cyan
     Write-Host ""
 
+    # Load current settings to know which file is active
+    $settingsPath     = Join-Path $ProjectPath ".deployment-settings.json"
+    $settings         = Get-DeploymentSettings -Path $settingsPath
+    $currentSelected  = $settings.SelectedParameterFile
+
     # Find existing parameters files in the project folder
     $existingFiles = @(Get-ChildItem -Path $ProjectPath -Filter "parameters.*.json" -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -ne "parameters.template.json" })
@@ -160,7 +165,8 @@ function Invoke-Mode2 {
     if ($existingFiles.Count -gt 0) {
         Write-Host "  Existing parameter files:" -ForegroundColor White
         for ($i = 0; $i -lt $existingFiles.Count; $i++) {
-            Write-Host "  [$($i+1)] $($existingFiles[$i].Name)" -ForegroundColor Gray
+            $marker = if ($existingFiles[$i].Name -eq $currentSelected) { "  (active)" } else { "" }
+            Write-Host "  [$($i+1)] $($existingFiles[$i].Name)$marker" -ForegroundColor Gray
         }
         Write-Host "  [N] Create new" -ForegroundColor Gray
         Write-Host ""
@@ -187,7 +193,10 @@ function Invoke-Mode2 {
             $paramFile = $existingFiles[$sel - 1].FullName
         }
     } else {
-        $envName   = Read-Required -Prompt "Environment name (e.g. local, dev, prod)"
+        # No files yet — suggest the name from SelectedParameterFile if set
+        $defaultEnv = ""
+        if ($currentSelected -match "^parameters\.(.+)\.json$") { $defaultEnv = $Matches[1] }
+        $envName   = Read-Required -Prompt "Environment name (e.g. local, dev, prod)" -Default $defaultEnv
         $paramFile = Join-Path $ProjectPath "parameters.$envName.json"
     }
 
@@ -290,6 +299,24 @@ function Invoke-Mode2 {
     $params | ConvertTo-Json -Depth 20 | Set-Content $paramFile
     Write-Host ""
     Write-Host "  Saved: $paramFile" -ForegroundColor Green
+
+    # Offer to set as active parameters file in deployment settings
+    $savedFileName = Split-Path $paramFile -Leaf
+    if ($savedFileName -ne $currentSelected) {
+        $ans = Read-Host "  Set '$savedFileName' as the active parameters file? [Y/n]"
+        if ($ans -ne 'n') {
+            $settings.SelectedParameterFile = $savedFileName
+            [PSCustomObject]@{
+                SelectedParameterFile = $settings.SelectedParameterFile
+                LastUpdated           = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+                FileOrder             = $settings.FileOrder
+                Configuration         = $settings.Configuration
+            } | ConvertTo-Json -Depth 10 | Set-Content $settingsPath
+            Write-Host "  Active parameters file: $savedFileName" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "  '$savedFileName' is already the active parameters file." -ForegroundColor Gray
+    }
 
     # Print remaining placeholders
     $remaining = Get-PlaceholderFields -Obj $params -Path ""

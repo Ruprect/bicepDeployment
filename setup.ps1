@@ -120,10 +120,130 @@ function Invoke-Mode1 {
 
 #endregion
 
-#region Mode 2 -- stub (implemented in Task 7)
+#region Mode 2 -- Parameters file (parameters.{env}.json)
 
 function Invoke-Mode2 {
-    Write-Host "  Mode 2 not yet implemented." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Parameters File Setup" -ForegroundColor Cyan
+    Write-Host ""
+
+    $envName   = Read-Required -Prompt "Environment name (e.g. local, dev, prod)"
+    $paramFile = Join-Path $PWD "parameters.$envName.json"
+
+    $templatePath = Join-Path $PSScriptRoot "templates\parameters.template.json"
+    if (-not (Test-Path $templatePath)) {
+        Write-Host "  Template not found at: $templatePath" -ForegroundColor Red
+        exit 1
+    }
+
+    if (Test-Path $paramFile) {
+        Write-Host "  Loading existing: $paramFile" -ForegroundColor Gray
+        $params = Get-Content $paramFile -Raw | ConvertFrom-Json
+    } else {
+        Write-Host "  Creating new from template." -ForegroundColor Gray
+        $params = Get-Content $templatePath -Raw | ConvertFrom-Json
+    }
+
+    $p = $params.parameters
+
+    # -- Critical fields --
+    Write-Host ""
+    Write-Host "  -- Critical Fields --" -ForegroundColor White
+
+    $envCurr = if ($p.environment.value -ne '<PLACEHOLDER>') { " [$($p.environment.value)]" } else { " (required)" }
+    $p.environment.value = Read-Required -Prompt "environment (e.g. test, prod)$envCurr"
+
+    $sufCurr = if ($p.projectSuffix.value -ne '<PLACEHOLDER>') { " [$($p.projectSuffix.value)]" } else { " (required)" }
+    $p.projectSuffix.value = Read-Required -Prompt "projectSuffix$sufCurr"
+
+    $dvUriCurr = if ($p.dataverse.value.uri -ne '<PLACEHOLDER>') { " [$($p.dataverse.value.uri)]" } else { " (required)" }
+    $p.dataverse.value.uri = Read-Required -Prompt "dataverse.uri$dvUriCurr"
+
+    $dvIdCurr = if ($p.dataverse.value.clientId -ne '<PLACEHOLDER>') { " [$($p.dataverse.value.clientId)]" } else { " (required)" }
+    $p.dataverse.value.clientId = Read-Required -Prompt "dataverse.clientId$dvIdCurr"
+
+    $bcEnvCurr = if ($p.businessCentral.value.environmentName -ne '<PLACEHOLDER>') { " [$($p.businessCentral.value.environmentName)]" } else { " (required)" }
+    $p.businessCentral.value.environmentName = Read-Required -Prompt "businessCentral.environmentName$bcEnvCurr"
+
+    # -- Countries (dynamic) --
+    Write-Host ""
+    Write-Host "  -- Business Central Countries --" -ForegroundColor White
+
+    $countries = [System.Collections.Generic.List[object]]@()
+    if ($p.businessCentral.value.countries) {
+        foreach ($c in $p.businessCentral.value.countries) { $countries.Add($c) }
+    }
+    if ($countries.Count -eq 0) {
+        $countries.Add([PSCustomObject]@{
+            name                = "denmark"
+            companyId           = "<PLACEHOLDER>"
+            serviceAccountGuid  = "<PLACEHOLDER>"
+            systemReferenceGuid = "<PLACEHOLDER>"
+        })
+        Write-Host "  Defaulted to Denmark entry." -ForegroundColor Gray
+    }
+
+    :countryLoop while ($true) {
+        Write-Host ""
+        Write-Host "  Current countries:" -ForegroundColor Gray
+        for ($i = 0; $i -lt $countries.Count; $i++) {
+            Write-Host "  [$($i+1)] $($countries[$i].name)  companyId: $($countries[$i].companyId)" -ForegroundColor White
+        }
+        Write-Host ""
+        Write-Host "  [A] Add   [R] Remove   [D] Done" -ForegroundColor Gray
+        $action = (Read-Host "  Action").ToUpper()
+
+        switch ($action) {
+            "A" {
+                $name      = Read-Required   -Prompt "Country name"
+                $companyId = Read-WithDefault -Prompt "companyId" -Default "<PLACEHOLDER>"
+                $countries.Add([PSCustomObject]@{
+                    name                = $name
+                    companyId           = $companyId
+                    serviceAccountGuid  = "<PLACEHOLDER>"
+                    systemReferenceGuid = "<PLACEHOLDER>"
+                })
+            }
+            "R" {
+                if ($countries.Count -le 1) {
+                    Write-Host "  Must keep at least one country." -ForegroundColor Red
+                } else {
+                    [int]$idx = (Read-Host "  Remove number") - 1
+                    if ($idx -ge 0 -and $idx -lt $countries.Count) {
+                        $countries.RemoveAt($idx)
+                    }
+                }
+            }
+            "D" { break countryLoop }
+            default { Write-Host "  Unknown action." -ForegroundColor Red }
+        }
+    }
+
+    $p.businessCentral.value | Add-Member -MemberType NoteProperty -Name countries -Value $countries.ToArray() -Force
+
+    # Write file
+    $params.parameters = $p
+    $params | ConvertTo-Json -Depth 20 | Set-Content $paramFile
+    Write-Host ""
+    Write-Host "  Saved: $paramFile" -ForegroundColor Green
+
+    # Print remaining placeholders
+    $remaining = Get-PlaceholderFields -Obj $params -Path ""
+    if ($remaining.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  The following fields still need manual values:" -ForegroundColor Yellow
+        foreach ($field in $remaining) { Write-Host "  - $field" -ForegroundColor Gray }
+    }
+
+    # .gitignore offer
+    Write-Host ""
+    Write-Host "  parameters.*.json files contain secrets -- do not commit them." -ForegroundColor Yellow
+    $ans = Read-Host "  Add 'parameters.*.json' to .gitignore automatically? [Y/n]"
+    if ($ans -ne 'n') {
+        Add-GitIgnoreEntry -ProjectPath $PWD -Entry "parameters.*.json"
+    }
+
+    Write-Host ""
 }
 
 #endregion

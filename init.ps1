@@ -52,7 +52,7 @@ function Invoke-Branch2A {
         Write-Host "  '$projectName' is already initialized." -ForegroundColor Yellow
         Write-Host "  Path: $targetPath" -ForegroundColor Gray
         $ans = Read-Host "  Run setup.ps1 there instead? [Y/n]"
-        if ($ans -ne 'n') { & (Join-Path $targetPath "setup.ps1") -ProjectPath $targetPath }
+        if ($ans -ne 'n') { & (Join-Path $targetPath "setup.ps1") }
         return
     }
 
@@ -205,7 +205,7 @@ function Invoke-Branch2B {
     Write-Host ""
     $ans = Read-Host "  Run setup.ps1 to configure deployment settings? [Y/n]"
     if ($ans -ne 'n') {
-        & (Join-Path $consumerPath "setup.ps1") -ProjectPath $consumerPath
+        & (Join-Path $consumerPath "setup.ps1")
     }
 }
 

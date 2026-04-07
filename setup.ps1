@@ -79,6 +79,20 @@ function Get-PlaceholderFields {
 
 if ($LoadHelpersOnly) { return }
 
+# Guard: block direct execution from within the bicepDeployment tool folder
+if (Test-IsToolRoot -Path $PSScriptRoot) {
+    $resolvedProject = [System.IO.Path]::GetFullPath($ProjectPath)
+    $resolvedTool    = [System.IO.Path]::GetFullPath($PSScriptRoot)
+    if ($resolvedProject -eq $resolvedTool) {
+        Write-Host ""
+        Write-Host "  You cannot run setup.ps1 directly from the bicepDeployment folder." -ForegroundColor Yellow
+        Write-Host "  Run setup.ps1 from your consumer project folder instead:" -ForegroundColor White
+        Write-Host "    ..\YourProject\setup.ps1" -ForegroundColor Green
+        Write-Host ""
+        exit 0
+    }
+}
+
 #region Mode 1 -- Deployment settings (.deployment-settings.json)
 
 function Invoke-Mode1 {

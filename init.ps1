@@ -24,7 +24,7 @@ $script:StubInit = @'
 
 $script:StubSetup = @'
 # Forwards to the bicepDeployment setup script.
-& "$PSScriptRoot/../bicepDeployment/setup.ps1" @args
+& "$PSScriptRoot/../bicepDeployment/setup.ps1" -ProjectPath $PSScriptRoot @args
 '@
 
 #endregion

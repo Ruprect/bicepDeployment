@@ -1,4 +1,7 @@
-param([switch]$LoadHelpersOnly)
+param(
+    [switch]$LoadHelpersOnly,
+    [string]$ProjectPath = $PWD
+)
 
 . "$PSScriptRoot\_helpers.ps1"
 
@@ -83,7 +86,7 @@ function Invoke-Mode1 {
     Write-Host "  Deployment Settings (.deployment-settings.json)" -ForegroundColor Cyan
     Write-Host ""
 
-    $settingsPath = Join-Path $PWD ".deployment-settings.json"
+    $settingsPath = Join-Path $ProjectPath ".deployment-settings.json"
     $settings     = Get-DeploymentSettings -Path $settingsPath
     $cfg          = $settings.Configuration
 
@@ -126,7 +129,7 @@ function Invoke-Mode2 {
     Write-Host ""
 
     $envName   = Read-Required -Prompt "Environment name (e.g. local, dev, prod)"
-    $paramFile = Join-Path $PWD "parameters.$envName.json"
+    $paramFile = Join-Path $ProjectPath "parameters.$envName.json"
 
     $templatePath = Join-Path $PSScriptRoot "templates\parameters.template.json"
     if (-not (Test-Path $templatePath)) {
@@ -241,7 +244,7 @@ function Invoke-Mode2 {
     Write-Host "  parameters.*.json files contain secrets -- do not commit them." -ForegroundColor Yellow
     $ans = Read-Host "  Add 'parameters.*.json' to .gitignore automatically? [Y/n]"
     if ($ans -ne 'n') {
-        Add-GitIgnoreEntry -ProjectPath $PWD -Entry "parameters.*.json"
+        Add-GitIgnoreEntry -ProjectPath $ProjectPath -Entry "parameters.*.json"
     }
 
     Write-Host ""

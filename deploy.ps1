@@ -8,11 +8,16 @@
 #
 # Then deploy from your consumer project folder using its deploy.ps1.
 
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Host "PowerShell 7+ is required. Run this script with 'pwsh' instead of 'powershell'." -ForegroundColor Red
+    exit 1
+}
+
 $isToolRoot = Test-Path (Join-Path $PSScriptRoot "deployScript/main.py")
 
 if ($isToolRoot) {
     Write-Host ""
-    Write-Host "  bicepDeployment — Tool Folder" -ForegroundColor Cyan
+    Write-Host "  bicepDeployment -- Tool Folder" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  You cannot run deployments from inside the bicepDeployment folder." -ForegroundColor Yellow
     Write-Host ""

@@ -50,9 +50,7 @@
       "value": {
         "containerName": "<PLACEHOLDER>",
         "connectionName": "azureblob",
-        "accellaPath": "<PLACEHOLDER>",
-        "lowellPath": "<PLACEHOLDER>",
-        "bottomlinePath": "<PLACEHOLDER>"
+        "orderPlannerPath": "<PLACEHOLDER>"
       }
     },
     "secretValues": {

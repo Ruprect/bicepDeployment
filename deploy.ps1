@@ -22,5 +22,6 @@ if ($isToolRoot) {
     exit 0
 }
 
-# Consumer project — run the deployment
-python .\deploy.py
+Write-Host "deploy.ps1: unexpected execution context." -ForegroundColor Red
+Write-Host "Run deploy.ps1 from your consumer project folder, not from bicepDeployment." -ForegroundColor Yellow
+exit 1

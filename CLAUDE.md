@@ -13,15 +13,15 @@ This repository contains Azure infrastructure as code (IaC) templates using Bice
 1. **Connection Templates** (`00.0.connections.bicep`): Defines API connections to Business Central, Dataverse, and Azure Blob Storage
 2. **Storage Infrastructure** (`00.1.StorageAccount.bicep`): Azure Storage Account with managed identity blob connections
 3. **Helper Logic Apps** (`01.*.Helper.*.bicep`): Error handling, notifications, and utility workflows
-4. **Bottomline Integration** (`02.*-Bottomline*.bicep`): Bottomline system integration for order management and shipment tracking
-5. **External Integration** (`03.0-AccellaHandler.bicep`): Accella system integration using managed identity for blob storage
+4. **OrderPlanner Integration** (`02.*-OrderPlanner*.bicep`): OrderPlanner system integration for order management and shipment tracking
+5. **External Integration** (`03.0-LogisticsTracker.bicep`): LogisticsTracker system integration using managed identity for blob storage
 6. **Main Data Handler** (`11.0-BCDataHandler.bicep`): Core business logic for data synchronization
 7. **Country-Specific Templates** (`11.*_byCountry.bicep`): Entity-specific workflows for multi-tenant scenarios
 
 ### Data Flow
 
 - Business Central webhook triggers → Logic Apps → Dataverse updates
-- Bottomline system integration via blob storage triggers → Business Central API updates
+- OrderPlanner system integration via blob storage triggers → Business Central API updates
 - Supports multi-tenant scenarios (Norway/Sweden with different company IDs)
 - Handles various entity types: customers, tanks, NACE codes, salespersons, frame agreements, tank agreements, order management
 
@@ -102,9 +102,9 @@ Key parameters are defined in `parameters.local.json`:
 - `dataverse.clientSecret`: Client secret for Dataverse authentication
 - `dataverse.clientId`: Client ID for Dataverse connection (default: 49df27b2-3d6e-4e4b-9e55-d55ef9a433e9)
 - `dataverse.uri`: Dataverse environment URI
-- `businessCentral.environmentName`: BC environment name (default: FLOGAS_NO_DEV)
+- `businessCentral.environmentName`: BC environment name (default: CRONUS_NO_DEV)
 - `businessCentral.countries`: Array containing Norway and Sweden configurations with company IDs and system reference GUIDs
-- `storageAccount`: Configuration for blob storage paths and container names (includes bottomlinePath for order processing)
+- `storageAccount`: Configuration for blob storage paths and container names (includes orderPlannerPath for order processing)
 - `workflowNames`: Centralized Logic App naming convention for consistent resource naming
 - Environment-specific values are parameterized in individual Bicep files
 
@@ -120,7 +120,7 @@ The system uses three main connection types:
 
 - `dynamicssmbsaas`: Business Central connector
 - `commondataservice`: Dataverse connector
-- `azureblob`: Azure Blob Storage connector (configured with managed identity for AccellaHandler)
+- `azureblob`: Azure Blob Storage connector (configured with managed identity for LogisticsTracker)
 
 ## Key Development Patterns
 
@@ -164,13 +164,13 @@ The deployment script automatically manages template dependencies:
 1. **Connections first**: `00.0.connections.bicep` must be deployed before other templates
 2. **Storage infrastructure**: `00.1.StorageAccount.bicep` creates storage and blob connections
 3. **Helper workflows**: `01.*.Helper.*.bicep` provide shared utilities
-4. **Bottomline integrations**: `02.*-Bottomline*.bicep` handle order management and shipment tracking
-5. **External integrations**: `03.*AccellaHandler*.bicep` handle external system connectivity
+4. **OrderPlanner integrations**: `02.*-OrderPlanner*.bicep` handle order management and shipment tracking
+5. **External integrations**: `03.*LogisticsTracker*.bicep` handle external system connectivity
 6. **Data handlers**: `11.*` templates handle Business Central to Dataverse synchronization
 
 ### Managed Identity Configuration
 
-The AccellaHandler Logic App uses system-assigned managed identity for Azure Blob Storage access. The storage account connection is configured without authentication parameters to enable managed identity.
+The LogisticsTracker Logic App uses system-assigned managed identity for Azure Blob Storage access. The storage account connection is configured without authentication parameters to enable managed identity.
 
 ## Prerequisites
 

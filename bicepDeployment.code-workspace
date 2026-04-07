@@ -1,0 +1,48 @@
+{
+  "folders": [
+    {
+      "name": "BICEP Deployment Scripts",
+      "path": ".",
+    },
+  ],
+  "settings": {
+    "workbench.colorCustomizations": {
+      "activityBar.activeBackground": "#65c89b",
+      "activityBar.background": "#65c89b",
+      "activityBar.foreground": "#15202b",
+      "activityBar.inactiveForeground": "#15202b99",
+      "activityBarBadge.background": "#945bc4",
+      "activityBarBadge.foreground": "#e7e7e7",
+      "commandCenter.border": "#15202b99",
+      "sash.hoverBorder": "#65c89b",
+      "statusBar.background": "#42b883",
+      "statusBar.foreground": "#15202b",
+      "statusBarItem.hoverBackground": "#359268",
+      "statusBarItem.remoteBackground": "#42b883",
+      "statusBarItem.remoteForeground": "#15202b",
+      "titleBar.activeBackground": "#42b883",
+      "titleBar.activeForeground": "#15202b",
+      "titleBar.inactiveBackground": "#42b88399",
+      "titleBar.inactiveForeground": "#15202b99",
+    },
+    "peacock.color": "#42b883",
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "editor.formatOnSave": true,
+    "editor.formatOnPaste": true,
+    "yaml.schemas": {},
+  },
+  "extensions": {
+    "recommendations": [
+      "johnpapa.vscode-peacock",
+      "bencoleman.armview",
+      "ms-vscode.azurecli",
+      "ms-azuretools.vscode-azurefunctions",
+      "hnw.vscode-auto-open-markdown-preview",
+      "donjayamanne.githistory",
+      "anthropic.claude-code",
+      "ms-python.python",
+      "ms-python.pylint",
+      "ms-python.black-formatter",
+    ],
+  },
+}

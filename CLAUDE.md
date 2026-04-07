@@ -4,11 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This repository contains Azure infrastructure as code (IaC) templates using Bicep for deploying Logic Apps that integrate Microsoft Dynamics 365 Business Central with Microsoft Dataverse. The system handles data synchronization between these platforms for customer data, tanks, configuration templates, and other business entities.
+This repository serves two purposes:
+
+1. **Deployment Orchestration Framework**: A universal tool for deploying Azure Bicep templates via an interactive Python CLI. A Windows WPF GUI and VS Code extension also exist but are currently WIP.
+
+2. **Azure IaC Templates**: Bicep templates for deploying Logic Apps that integrate Microsoft Dynamics 365 Business Central with Microsoft Dataverse, handling data synchronization for customer data, tanks, configuration templates, and other business entities.
 
 ## Architecture
 
-### Core Components
+### Deployment Tool — Python CLI Module Structure (`deployScript/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `main.py` | Entry point, main loop, input handling |
+| `menu.py` | Color-coded interactive UI, key input handling |
+| `config.py` | Settings persistence, `.deployment-settings.json` management |
+| `bicep_manager.py` | Template discovery, SHA256 change detection, status tracking |
+| `deployment.py` | Deployment and validation orchestration |
+| `azure_client.py` | Azure CLI detection, authentication, `az` command execution |
+| `logger.py` | Dual console+file logging, spinner progress, ANSI colors |
+
+> **WIP**: A Windows WPF GUI (`WPF/`) and VS Code extension (`vscode-extension/`) are in development but not yet complete.
+
+### Bicep Template Components
 
 1. **Connection Templates** (`00.0.connections.bicep`): Defines API connections to Business Central, Dataverse, and Azure Blob Storage
 2. **Storage Infrastructure** (`00.1.StorageAccount.bicep`): Azure Storage Account with managed identity blob connections
@@ -29,18 +47,6 @@ This repository contains Azure infrastructure as code (IaC) templates using Bice
 
 ### Deployment
 
-This project uses the universal Bicep deployment scripts from the [bicepDeployment](https://github.com/Ruprect/bicepDeployment) repository.
-
-#### Setup (First Time)
-```bash
-# Method 1: Git submodule (recommended)
-git submodule add https://github.com/Ruprect/bicepDeployment.git
-
-# Method 2: Clone separately
-git clone https://github.com/Ruprect/bicepDeployment.git
-```
-
-#### Deploy Templates
 ```bash
 # Using submodule or cloned repo
 python bicepDeployment/deploy.py
@@ -48,71 +54,104 @@ python bicepDeployment/deploy.py
 # If deployment scripts are copied locally
 python deploy.py
 
-# Legacy PowerShell (guides to Python setup)
+# Legacy PowerShell launcher (calls deploy.py)
 .\deploy.ps1
 ```
 
-The deployment script provides an enhanced interactive menu:
+### Interactive Menu Options
 
-- **Number selection (1-N)**: Deploy individual templates 
-- **A**: Deploy all enabled templates with validation mode integration
-- **V**: Toggle validation modes (All/Changed/Skip)
-- **O**: Reorder templates and enable/disable them for deployment
-- **P**: Select parameter file (`parameters.local.json` or others)
+- **Number (1-N)**: Deploy individual template
+- **Range/List**: Deploy a subset — e.g. `1-3`, `1,3,5`, `1-3,5,10-15`
+- **A**: Deploy all enabled templates
+- **V**: Toggle validation mode (All / Changed / Skip)
+- **O**: Reorder templates and enable/disable them
+- **P**: Select parameter file
 - **R**: Refresh file list to detect new templates
 - **C**: Configure Azure CLI settings and authentication
 - **Q**: Quit
 
-The deployment system automatically:
+### What the Deployment System Does Automatically
 
 - **Discovers** all `.bicep` files in the current directory
+- **Detects changes** using SHA256 file hashing (falls back to modification timestamp)
+- **Prompts** before deploying an unchanged template (with "always skip/deploy" options)
 - **Maintains** deployment order and enabled/disabled state in `.deployment-settings.json`
 - **Validates** Azure CLI availability and authentication
 - **Prevents** deployment of empty (0 KB) files
-- **Supports** validation modes and timestamped deployment names
-- **Generates** comprehensive deployment logs in `logs/` folder with professional output
-- **Tracks** deployment history and change detection
+- **Generates** timestamped deployment names for Azure portal tracking
+- **Generates** comprehensive deployment logs in `logs/`
+- **Tracks** both deployment history and validation history per template
 
 ### Direct Azure CLI Commands
 
-Validate Bicep templates:
-
 ```bash
-az deployment group validate --resource-group <resource-group> --template-file <template-file> --parameters @parameters.local.json
-```
+# Validate
+az deployment group validate --resource-group <rg> --template-file <file> --parameters @parameters.local.json
 
-Deploy specific template:
+# Deploy (Incremental)
+az deployment group create --resource-group <rg> --template-file <file> --parameters @parameters.local.json
 
-```bash
-az deployment group create --resource-group <resource-group> --template-file <template-file> --parameters @parameters.local.json
-```
-
-Deploy with Complete mode (removes resources not in template):
-
-```bash
-az deployment group create --resource-group <resource-group> --template-file <template-file> --mode Complete --parameters @parameters.local.json
+# Deploy (Complete — removes resources not in template)
+az deployment group create --resource-group <rg> --template-file <file> --mode Complete --parameters @parameters.local.json
 ```
 
 ## Configuration
 
-### Parameters
+### Deployment Settings (`.deployment-settings.json`)
 
-Key parameters are defined in `parameters.local.json`:
+Auto-created on first run. Shared across all interfaces.
+
+```json
+{
+  "SelectedParameterFile": "parameters.local.json",
+  "LastUpdated": "2025-09-05 09:29:07",
+  "FileOrder": [
+    {
+      "FileName": "00.0.connections.bicep",
+      "Enabled": true,
+      "LastDeploymentSuccess": true,
+      "LastDeployment": "2025-09-05 09:29:07",
+      "LastFileHash": "<sha256>",
+      "LastDeploymentError": null,
+      "LastValidationSuccess": true,
+      "LastValidation": "2025-09-05 09:28:45",
+      "LastValidationError": null
+    }
+  ],
+  "Configuration": {
+    "ResourceGroup": "my-resource-group",
+    "Subscription": "subscription-id",
+    "DesiredTenant": "tenant-id",
+    "ConsoleWidth": 75,
+    "ValidationMode": "All"
+  }
+}
+```
+
+### Validation Modes
+
+| Mode | Behaviour |
+|------|-----------|
+| **All** | Validate all templates before every deployment |
+| **Changed** | Only validate templates modified since last deployment |
+| **Skip** | Deploy without any pre-flight validation |
+
+### Bicep Parameters (`parameters.local.json`)
+
+Key parameters:
 
 - `dataverse.clientSecret`: Client secret for Dataverse authentication
-- `dataverse.clientId`: Client ID for Dataverse connection (default: 49df27b2-3d6e-4e4b-9e55-d55ef9a433e9)
+- `dataverse.clientId`: Client ID for Dataverse connection
 - `dataverse.uri`: Dataverse environment URI
-- `businessCentral.environmentName`: BC environment name (default: CRONUS_NO_DEV)
+- `businessCentral.environmentName`: BC environment name (default: `CRONUS_NO_DEV`)
 - `businessCentral.countries`: Array containing Norway and Sweden configurations with company IDs and system reference GUIDs
-- `storageAccount`: Configuration for blob storage paths and container names (includes orderPlannerPath for order processing)
-- `workflowNames`: Centralized Logic App naming convention for consistent resource naming
-- Environment-specific values are parameterized in individual Bicep files
+- `storageAccount`: Blob storage paths and container names (includes `orderPlannerPath` for order processing)
+- `workflowNames`: Centralized Logic App naming convention
 
 ### Template Naming Convention
 
 - `la-{environment}-bc-{workflow-name}` for Logic Apps
-- Environment defaults to 'test'
-- Workflow names correspond to business functions
+- Environment defaults to `test`
 
 ### Connection Configuration
 
@@ -128,9 +167,9 @@ The system uses three main connection types:
 
 All Logic Apps implement a Try-Catch-Finally pattern:
 
-- Try: Main business logic
-- Catch: Error handling with helper workflow calls
-- Finally: Response handling and termination
+- **Try**: Main business logic
+- **Catch**: Error handling with helper workflow calls
+- **Finally**: Response handling and termination
 
 ### Data Synchronization
 
@@ -148,6 +187,7 @@ All deployment logs are automatically stored in the `logs/` folder:
 
 - `logs/deployment-YYYY-MM-DD_HH-mm-ss.log`: Timestamped deployment logs
 - `logs/deployment-latest.log`: Most recent deployment log
+- `logs/azure-cli-debug.log`: Azure CLI detection debug log
 
 ### Development Artifacts
 
@@ -182,17 +222,19 @@ The LogisticsTracker Logic App uses system-assigned managed identity for Azure B
 
 ## Prerequisites
 
-- Azure CLI installed and configured (`az login` required)
-- PowerShell 5.1 or later for deployment scripts
+- **Azure CLI** installed and configured (`az login` required)
+- **Python 3.x** for the CLI deployment tool (`pip install colorama` optional, for Windows color support)
+- **PowerShell 5.1+** for legacy deployment scripts
 - Access to Business Central and Dataverse environments
-- Valid service principals and connection credentials configured in `parameters.local.json`
+- Valid service principals and connection credentials in `parameters.local.json`
 
 ## Important Notes
 
-- All Logic Apps default to 'Disabled' state for safety - must be manually enabled after deployment
-- The deployment script handles different Azure CLI commands for different template types
-- Complete deployment mode is only available for the first template in deployment order
+- All Logic Apps default to 'Disabled' state for safety — must be manually enabled after deployment
+- Complete deployment mode removes Azure resources not defined in the template — use with caution
 - Empty (0 KB) template files are automatically disabled and cannot be deployed
 - Service account modifications are ignored to prevent circular updates
+- SHA256 hashing is used to detect file changes — the tool will prompt before re-deploying an unchanged template
 - Deployment logs provide detailed timing and success/failure information for troubleshooting
 - Always test deployments in development environment before production
+- `deploy.ps1-old` in the root is the legacy full-PowerShell implementation, kept for reference only

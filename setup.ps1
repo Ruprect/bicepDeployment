@@ -117,6 +117,15 @@ function Invoke-Mode1 {
     Write-Host ""
     Write-Host "  Saved: $settingsPath" -ForegroundColor Green
     Write-Host ""
+
+    # On first run, offer to set up a parameters file if none exist
+    $existingParams = @(Get-ChildItem -Path $ProjectPath -Filter "parameters.*.json" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne "parameters.template.json" })
+    if ($existingParams.Count -eq 0) {
+        Write-Host "  No parameters file found in this project." -ForegroundColor Yellow
+        $ans = Read-Host "  Set one up now? [Y/n]"
+        if ($ans -ne 'n') { Invoke-Mode2 }
+    }
 }
 
 #endregion
@@ -128,8 +137,45 @@ function Invoke-Mode2 {
     Write-Host "  Parameters File Setup" -ForegroundColor Cyan
     Write-Host ""
 
-    $envName   = Read-Required -Prompt "Environment name (e.g. local, dev, prod)"
-    $paramFile = Join-Path $ProjectPath "parameters.$envName.json"
+    # Find existing parameters files in the project folder
+    $existingFiles = @(Get-ChildItem -Path $ProjectPath -Filter "parameters.*.json" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne "parameters.template.json" })
+
+    $paramFile = $null
+
+    if ($existingFiles.Count -gt 0) {
+        Write-Host "  Existing parameter files:" -ForegroundColor White
+        for ($i = 0; $i -lt $existingFiles.Count; $i++) {
+            Write-Host "  [$($i+1)] $($existingFiles[$i].Name)" -ForegroundColor Gray
+        }
+        Write-Host "  [N] Create new" -ForegroundColor Gray
+        Write-Host ""
+
+        $sel = $null
+        do {
+            $selInput = Read-Host "  Select"
+            if ($selInput.ToUpper() -eq "N") {
+                $sel = "N"
+            } else {
+                $parsed = 0
+                if ([int]::TryParse($selInput, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le $existingFiles.Count) {
+                    $sel = $parsed
+                } else {
+                    Write-Host "  Please enter a number between 1 and $($existingFiles.Count), or N for new." -ForegroundColor Red
+                }
+            }
+        } while ($null -eq $sel)
+
+        if ($sel -eq "N") {
+            $envName   = Read-Required -Prompt "Environment name (e.g. local, dev, prod)"
+            $paramFile = Join-Path $ProjectPath "parameters.$envName.json"
+        } else {
+            $paramFile = $existingFiles[$sel - 1].FullName
+        }
+    } else {
+        $envName   = Read-Required -Prompt "Environment name (e.g. local, dev, prod)"
+        $paramFile = Join-Path $ProjectPath "parameters.$envName.json"
+    }
 
     $templatePath = Join-Path $PSScriptRoot "templates\parameters.template.json"
     if (-not (Test-Path $templatePath)) {

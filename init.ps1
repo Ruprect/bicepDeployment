@@ -127,10 +127,77 @@ function Invoke-Branch2A {
 
 #endregion
 
-#region Branch 2B -- Running in a consumer project (stub -- implemented in Task 5)
+#region Branch 2B -- Running in a consumer project (patch workspace + run setup)
 
 function Invoke-Branch2B {
-    Write-Host "Branch 2B not yet implemented." -ForegroundColor Yellow
+    $consumerPath = $PSScriptRoot
+    $toolPath     = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../bicepDeployment"))
+
+    Write-Host ""
+    Write-Host "  bicepDeployment -- Workspace Check" -ForegroundColor Cyan
+    Write-Host ""
+
+    if (-not (Test-Path $toolPath)) {
+        Write-Host "  bicepDeployment not found at: $toolPath" -ForegroundColor Red
+        Write-Host "  Ensure bicepDeployment is cloned relative to this project." -ForegroundColor Yellow
+        exit 1
+    }
+
+    $bicepRelPath = Get-RelativePath -From $consumerPath -To $toolPath
+
+    # Find all .code-workspace files in consumer project folder
+    $workspaceFiles = @(Get-ChildItem -Path $consumerPath -Filter "*.code-workspace" -ErrorAction SilentlyContinue)
+
+    if ($workspaceFiles.Count -eq 0) {
+        Write-Host "  No .code-workspace file found in this folder." -ForegroundColor Yellow
+        $ans = Read-Host "  Create one? [Y/n]"
+        if ($ans -eq 'n') {
+            Write-Host "  Skipped workspace creation." -ForegroundColor Gray
+        } else {
+            $folderName    = Split-Path $consumerPath -Leaf
+            $workspaceFile = Join-Path $consumerPath "$folderName.code-workspace"
+            [PSCustomObject]@{
+                folders = @(
+                    [PSCustomObject]@{ path = "." },
+                    [PSCustomObject]@{ path = $bicepRelPath }
+                )
+            } | ConvertTo-Json -Depth 10 | Set-Content $workspaceFile
+            Write-Host "  Created: $workspaceFile" -ForegroundColor Green
+        }
+    } else {
+        # Select workspace file if multiple exist
+        if ($workspaceFiles.Count -eq 1) {
+            $workspaceFile = $workspaceFiles[0].FullName
+        } else {
+            Write-Host "  Multiple workspace files found:" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $workspaceFiles.Count; $i++) {
+                Write-Host "  [$($i+1)] $($workspaceFiles[$i].Name)" -ForegroundColor White
+            }
+            $sel = Read-Host "  Select [1-$($workspaceFiles.Count)]"
+            $workspaceFile = $workspaceFiles[[int]$sel - 1].FullName
+        }
+
+        $ws = Get-Content $workspaceFile -Raw | ConvertFrom-Json
+        if (Test-WorkspaceReferencesBicep -Workspace $ws -BicepRelPath $bicepRelPath) {
+            Write-Host "  Workspace already references bicepDeployment." -ForegroundColor Green
+        } else {
+            Write-Host "  bicepDeployment not referenced in workspace." -ForegroundColor Yellow
+            $ans = Read-Host "  Add it? [Y/n]"
+            if ($ans -ne 'n') {
+                $folders = [System.Collections.Generic.List[object]]($ws.folders)
+                $folders.Add([PSCustomObject]@{ path = $bicepRelPath })
+                $ws | Add-Member -MemberType NoteProperty -Name folders -Value $folders.ToArray() -Force
+                $ws | ConvertTo-Json -Depth 10 | Set-Content $workspaceFile
+                Write-Host "  Workspace updated." -ForegroundColor Green
+            }
+        }
+    }
+
+    Write-Host ""
+    $ans = Read-Host "  Run setup.ps1 to configure deployment settings? [Y/n]"
+    if ($ans -ne 'n') {
+        & (Join-Path $consumerPath "setup.ps1")
+    }
 }
 
 #endregion

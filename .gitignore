@@ -51,8 +51,18 @@ parameters.*.json
 # Temporary files
 *.tmp
 *.temp
+tmpclaude*
 
 # Claude Code artifacts
 .claude/
 claude.md
 CLAUDE.md
+
+# Claude Code artifact folders
+.backup/
+.drafts/
+.scripts/
+.notes/
+
+# Not ready for commit
+vscode-extension

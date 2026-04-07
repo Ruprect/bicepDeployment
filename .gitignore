@@ -64,7 +64,6 @@ CLAUDE.md
 .drafts/
 .scripts/
 .notes/
-.tests/
 
 # Not ready for commit
 vscode-extension

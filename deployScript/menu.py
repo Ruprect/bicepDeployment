@@ -3,12 +3,13 @@
 import os
 import shutil
 import sys
+from datetime import datetime
 from typing import List, Optional
 from pathlib import Path
 
 from .logger import logger, LogLevel, Color
 from .bicep_manager import BicepTemplate
-from .azure_client import AzureClient, AzureSubscription, AzureResourceGroup
+from .azure_client import AzureClient, AzureSubscription, AzureResourceGroup, AzureResource
 from .config import ConfigManager
 
 
@@ -17,6 +18,7 @@ class MenuSystem:
         self.azure_client = azure_client
         self.config_manager = config_manager
         self.last_deployment_result = None
+        self.last_validation_result = None  # {'timestamp': datetime, 'success': bool, 'detail': str}
     
     def clear_screen(self):
         """Clear the terminal screen."""
@@ -71,6 +73,9 @@ class MenuSystem:
     
     def _colorize_option(self, option_text: str) -> str:
         """Add color to menu option with brackets."""
+        # Skip if already contains ANSI color codes
+        if '\x1b' in option_text:
+            return option_text
         # Check if option has brackets
         if '[' in option_text and ']' in option_text:
             # Find the bracketed letter
@@ -333,12 +338,16 @@ class MenuSystem:
         else:  # Skip
             validation_text = f"({Color.RED}Skip [V]alidation{Color.RESET})"
         
+        if templates:
+            options.append(f"[A] Deploy all {validation_text}")
+        else:
+            options.append(f"{Color.GRAY}[A] Deploy all (no templates){Color.RESET}")
         options.extend([
-            f"[A] Deploy all {validation_text}",
             "[O] Reorder",
-            "[P] Parameters", 
+            "[P] Parameters",
             "[R] Refresh",
             "[C] Config",
+            "[E] Export from Azure",
             "[Q] Quit"
         ])
         
@@ -584,17 +593,6 @@ class MenuSystem:
     def show_configuration_menu(self):
         """Show configuration management menu with arrow selection and keyboard shortcuts."""
         config_items = [
-<<<<<<< HEAD
-            {"name": "Set Tenant", "key": "T", "action": self._handle_tenant_selection},
-            {"name": "Validate Login", "key": "V", "action": self._handle_validate_login},
-            {"name": "Login", "key": "L", "action": self._handle_azure_login},
-            {"name": "Set Chrome Profile", "key": "P", "action": self._handle_chrome_profile_selection},
-            {"name": "Get Subscriptions", "key": "S", "action": self._handle_subscription_selection},
-            {"name": "Get Resource Groups", "key": "R", "action": self._handle_resource_group_selection},
-            {"name": "Console Width", "key": "W", "action": self._handle_console_width_configuration},
-            {"name": "Refresh Azure Status", "key": "F", "action": self._handle_refresh_azure_status},
-            {"name": "Back to Main Menu", "key": "Q", "action": None}
-=======
             {"name": "[T] Set tenant", "key": "T", "action": self._handle_tenant_selection},
             {"name": "[V] Validate login", "key": "V", "action": self._handle_validate_login},
             {"name": "[L] Login to Azure", "key": "L", "action": self._handle_azure_login},
@@ -603,7 +601,6 @@ class MenuSystem:
             {"name": "[R] Change Resource Group", "key": "R", "action": self._handle_resource_group_selection},
             {"name": "[W] Configure console width", "key": "W", "action": self._handle_console_width_configuration},
             {"name": "[Q] Back to main menu", "key": "Q", "action": None}
->>>>>>> 9fac298 (Enhance deployment script UX with range deployment and improved configuration menu)
         ]
 
         current_selection = 0
@@ -665,47 +662,18 @@ class MenuSystem:
 
             # Azure CLI status - use cached version
             print("\n" + "=" * 50)
-<<<<<<< HEAD
-            if not self.azure_client.is_azure_cli_available():
-                print("❌ Azure CLI not installed or not in PATH")
-                print("🔐 Currently logged in to: Unknown")
-                print("📊 Active Subscription: None")
-            else:
-                print("✅ Azure CLI is available")
-                
-                # Show cache status
-                cache_valid = self.azure_client._is_cache_valid()
-                cache_status = "🟢 Cached" if cache_valid else "🔄 Will refresh"
-                print(f"💾 Status cache: {cache_status}")
-                
-                tenant_info = self.azure_client.get_current_azure_tenant_info()
-                if tenant_info:
-                    print(f"🔐 Currently logged in to: {tenant_info['displayName']}")
-                    print(f"📊 Active Subscription: {tenant_info['subscriptionName']}")
-                else:
-                    print("🔐 Currently logged in to: Unknown")
-                    print("📊 Active Subscription: None")
-            
-            # Display configuration options in main menu style
-            print(f"\n{separator}")
-            
-            # Build options for configuration menu
-            config_options = []
-            for i, item in enumerate(config_items):
-                option_text = f"[{item['key']}] {item['name']}"
-                config_options.append(option_text)
-            
-            # Format menu with wrapping like main menu - this will handle coloring
-            menu_lines = self._format_menu_with_wrapping(config_options)
-            
-            # Display menu
-            for line in menu_lines:
-                print(line)
-            
-=======
             print(azure_status_cached['cli_status'])
             print(azure_status_cached['login_status'])
             print(azure_status_cached['subscription_status'])
+
+            # Last validation result
+            if self.last_validation_result:
+                v = self.last_validation_result
+                ts = v['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+                if v['success']:
+                    print(f"{Color.GREEN}✅ Last validated: {ts} — {v['detail']}{Color.RESET}")
+                else:
+                    print(f"{Color.RED}❌ Last validated: {ts} — {v['detail']}{Color.RESET}")
 
             # Display configuration options with arrow navigation and keyboard shortcuts
             print(f"\n{separator}")
@@ -725,7 +693,6 @@ class MenuSystem:
                 else:
                     print(f"  {colored_option}")
 
->>>>>>> 9fac298 (Enhance deployment script UX with range deployment and improved configuration menu)
             print(f"{separator}")
 
             # Get key input
@@ -749,14 +716,6 @@ class MenuSystem:
             elif key == 'Q':
                 return
             else:
-<<<<<<< HEAD
-                # Handle direct key selection
-                for item in config_items:
-                    if key == item['key']:
-                        if item['action']:
-                            item['action']()
-                        else:  # Back to Main Menu
-=======
                 # Check if key matches any shortcut
                 for i, item in enumerate(config_items):
                     if key == item['key']:
@@ -767,7 +726,6 @@ class MenuSystem:
                             if item['key'] in ['V', 'L', 'S']:
                                 azure_status_cached = self._get_azure_status_cached()
                         else:  # Back to Main Menu (Q)
->>>>>>> 9fac298 (Enhance deployment script UX with range deployment and improved configuration menu)
                             return
                         break
     
@@ -790,17 +748,22 @@ class MenuSystem:
         if not self.azure_client.is_azure_cli_available():
             logger.log("Azure CLI is not available", LogLevel.ERROR, Color.RED)
             return
-            
+
         logger.log("Validating Azure login...", LogLevel.INFO, Color.CYAN)
+        timestamp = datetime.now()
         if self.azure_client.test_azure_login():
             tenant_info = self.azure_client.get_current_azure_tenant_info()
             if tenant_info:
+                detail = f"{tenant_info['displayName']} | {tenant_info['subscriptionName']}"
                 logger.log(f"✅ Successfully logged in to {tenant_info['displayName']}", LogLevel.SUCCESS, Color.GREEN)
                 logger.log(f"   Tenant ID: {tenant_info['tenantId']}", LogLevel.INFO, Color.GRAY)
                 logger.log(f"   Subscription: {tenant_info['subscriptionName']}", LogLevel.INFO, Color.GRAY)
             else:
+                detail = "Logged in (tenant info unavailable)"
                 logger.log("✅ Logged in but could not get tenant information", LogLevel.WARN, Color.YELLOW)
+            self.last_validation_result = {'timestamp': timestamp, 'success': True, 'detail': detail}
         else:
+            self.last_validation_result = {'timestamp': timestamp, 'success': False, 'detail': 'Not logged in'}
             logger.log("❌ Not logged in to Azure", LogLevel.ERROR, Color.RED)
     
     def _handle_tenant_selection(self):
@@ -854,31 +817,6 @@ class MenuSystem:
         print(self._get_separator())
         print("    SUBSCRIPTION SELECTION")
         print(self._get_separator())
-<<<<<<< HEAD
-        
-        # Show current subscription
-        current_sub = self.config_manager.get_subscription()
-        if current_sub:
-            print(f"\n📊 Current subscription: {current_sub}")
-        else:
-            print("\n📊 Current subscription: None selected")
-        
-        print(f"\n📋 Available subscriptions ({len(subscriptions)} found):")
-        print()
-        
-        for i, sub in enumerate(subscriptions, 1):
-            # Highlight current subscription
-            if current_sub == sub.subscription_id:
-                print(f"  {Color.GREEN}✓ {i:2d}. {sub.name}{Color.RESET}")
-                print(f"      {Color.GRAY}📍 {sub.state} | 🏢 Tenant: {sub.tenant_id}{Color.RESET}")
-                print(f"      {Color.GRAY}🆔 Subscription ID: {sub.subscription_id}{Color.RESET}")
-            else:
-                print(f"    {i:2d}. {sub.name}")
-                print(f"       {Color.GRAY}📍 {sub.state} | 🏢 Tenant: {sub.tenant_id}{Color.RESET}")
-                print(f"       {Color.GRAY}🆔 Subscription ID: {sub.subscription_id}{Color.RESET}")
-            print()
-        
-=======
         print(f"\n{Color.CYAN}⏳ Loading subscriptions...{Color.RESET}")
 
         subscriptions = self.azure_client.get_azure_subscriptions()
@@ -911,7 +849,6 @@ class MenuSystem:
                 print(f"  {i}. {sub.name} ({sub.state})")
                 print(f"     ID: {sub.subscription_id}")
 
->>>>>>> 9fac298 (Enhance deployment script UX with range deployment and improved configuration menu)
         try:
             choice_input = input(f"\nSelect subscription (1-{len(subscriptions)}, or press Enter to keep current): ").strip()
 
@@ -1049,4 +986,61 @@ class MenuSystem:
                 logger.log("❌ Cache refreshed but not logged in to Azure", LogLevel.WARN, Color.YELLOW)
         else:
             logger.log("❌ Azure CLI is not available", LogLevel.ERROR, Color.RED)
+
+    def show_export_picklist(self, resources: List[AzureResource]) -> Optional[List[AzureResource]]:
+        """
+        Show a multi-select picklist of Azure resources.
+        Returns selected list on Enter (may be empty), None on Q (cancel).
+        Controls: UP/DOWN navigate, Space toggle, A=all, N=none, Enter=confirm, Q=cancel.
+        """
+        selected = set()  # indices of selected resources
+        current = 0       # currently highlighted index
+
+        while True:
+            self.clear_screen()
+            console_width = self._get_console_width()
+            separator = "=" * console_width
+
+            header = "EXPORT FROM AZURE — SELECT RESOURCES"
+            padding = (console_width - len(header)) // 2
+            print(separator)
+            print(" " * padding + header)
+            print(separator)
+            print()
+            print(f"  {Color.GRAY}UP/DOWN navigate  |  Space toggle  |  [A] all  |  [N] none  |  Enter confirm  |  [Q] cancel{Color.RESET}")
+            print()
+
+            for i, resource in enumerate(resources):
+                check = f"{Color.GREEN}✓{Color.RESET}" if i in selected else " "
+                type_slug = resource.resource_type.split("/")[-1]
+                row = f"[{check}] {resource.name}  {Color.GRAY}|  {type_slug}  |  {resource.location}{Color.RESET}"
+                if i == current:
+                    print(f"  {Color.CYAN}→{Color.RESET} {row}")
+                else:
+                    print(f"    {row}")
+
+            print()
+            count = len(selected)
+            print(f"  {Color.CYAN}{count} selected{Color.RESET}")
+            print(separator)
+
+            key = self._get_key()
+
+            if key == 'UP':
+                current = max(0, current - 1)
+            elif key == 'DOWN':
+                current = min(len(resources) - 1, current + 1)
+            elif key == ' ':
+                if current in selected:
+                    selected.discard(current)
+                else:
+                    selected.add(current)
+            elif key == 'A':
+                selected = set(range(len(resources)))
+            elif key == 'N':
+                selected = set()
+            elif key == 'ENTER':
+                return [resources[i] for i in sorted(selected)]
+            elif key in ('Q', 'ESC'):
+                return None
 

@@ -69,12 +69,15 @@ class ResourceExporter:
             else:
                 # tmp_path was deleted inside _decompile_to_bicep — write fallback from in-memory template
                 fallback = output_dir / f"{stem}.json"
+                fallback_saved = False
                 try:
                     fallback.write_text(json.dumps(template, indent=2), encoding='utf-8')
-                except OSError:
-                    pass
+                    fallback_saved = True
+                except OSError as write_err:
+                    logger.log(f"   Could not save fallback JSON: {write_err}", LogLevel.ERROR, Color.RED)
                 logger.log(f"❌ {resource.name}: {reason}", LogLevel.ERROR, Color.RED)
-                logger.log(f"   Raw ARM JSON saved as {stem}.json", LogLevel.WARN, Color.YELLOW)
+                if fallback_saved:
+                    logger.log(f"   Raw ARM JSON saved as {stem}.json", LogLevel.WARN, Color.YELLOW)
 
         return success, total
 

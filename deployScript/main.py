@@ -3,6 +3,7 @@
 import sys
 import argparse
 from pathlib import Path
+from datetime import datetime
 
 from .logger import logger, LogLevel, Color
 from .config import ConfigManager
@@ -10,6 +11,7 @@ from .azure_client import AzureClient
 from .bicep_manager import BicepManager
 from .deployment import DeploymentManager
 from .menu import MenuSystem
+from .exporter import ResourceExporter
 
 
 class DeployScript:
@@ -26,7 +28,8 @@ class DeployScript:
             self.config_manager
         )
         self.menu_system = MenuSystem(self.azure_client, self.config_manager)
-        
+        self.exporter = ResourceExporter(self.azure_client, self.config_manager)
+
         # Runtime state
         self.selected_parameter_file = None
         self.validation_mode = self.config_manager.get_validation_mode()  # Load from config
@@ -84,7 +87,11 @@ class DeployScript:
                     break
                     
                 elif choice == "A":
-                    self._handle_deploy_all(templates)
+                    if not templates:
+                        logger.log("No bicep files found. Add .bicep files to deploy.", LogLevel.WARN, Color.YELLOW)
+                        input("Press Enter to continue...")
+                    else:
+                        self._handle_deploy_all(templates)
                     
                 elif choice == "V":
                     self._handle_toggle_validation_mode()
@@ -100,7 +107,10 @@ class DeployScript:
                     
                 elif choice == "C":
                     self.menu_system.show_configuration_menu()
-                    
+
+                elif choice == "E":
+                    self._handle_export_resources()
+
                 elif choice.isdigit():
                     self._handle_deploy_individual(templates, int(choice))
 
@@ -207,6 +217,74 @@ class DeployScript:
         """Handle refreshing the template file list."""
         count = self.bicep_manager.refresh_file_list()
         logger.log(f"File list refreshed. Found {count} template(s).", LogLevel.INFO, Color.GREEN)
+
+    def _handle_export_resources(self):
+        """Handle exporting Azure Resource Group resources as individual Bicep files."""
+        # Pre-flight: login check
+        if not self.azure_client.test_azure_login():
+            logger.log(
+                "Not logged in. Use [C] Config → [L] Login first.",
+                LogLevel.WARN, Color.YELLOW
+            )
+            input("Press Enter to continue...")
+            return
+
+        # Pre-flight: resource group check
+        rg = self.config_manager.get_resource_group()
+        if not rg:
+            logger.log(
+                "No Resource Group configured. Set one in [C] Config first.",
+                LogLevel.WARN, Color.YELLOW
+            )
+            input("Press Enter to continue...")
+            return
+
+        # Pre-flight: az bicep check
+        if not self.exporter.check_bicep_available():
+            logger.log(
+                "az bicep not found. Install it with: az bicep install",
+                LogLevel.ERROR, Color.RED
+            )
+            input("Press Enter to continue...")
+            return
+
+        # Fetch resources
+        logger.log(f"Loading resources from '{rg}'...", LogLevel.INFO, Color.CYAN)
+        resources = self.azure_client.list_resource_group_resources(rg)
+        if not resources:
+            logger.log(f"No resources found in resource group '{rg}'.", LogLevel.WARN, Color.YELLOW)
+            input("Press Enter to continue...")
+            return
+
+        # Picklist
+        selected = self.menu_system.show_export_picklist(resources)
+        if selected is None:
+            return  # User pressed Q — silent cancel
+        if not selected:
+            logger.log("Nothing selected.", LogLevel.INFO, Color.YELLOW)
+            input("Press Enter to continue...")
+            return
+
+        # Build output directory
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        output_dir = Path("exported") / timestamp
+
+        # Export
+        success, total = self.exporter.export_resources(selected, output_dir)
+
+        # Summary
+        print()
+        if success == total:
+            logger.log(
+                f"Exported {success}/{total} resources to {output_dir}/",
+                LogLevel.SUCCESS, Color.GREEN
+            )
+        else:
+            logger.log(
+                f"Exported {success}/{total} resources to {output_dir}/ ({total - success} failed — see above)",
+                LogLevel.WARN, Color.YELLOW
+            )
+        input("Press Enter to continue...")
 
     def _parse_template_range(self, range_input: str, max_templates: int) -> list:
         """Parse a range input like '1-3,5,10-15' and return a list of template numbers.

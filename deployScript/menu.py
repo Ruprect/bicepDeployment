@@ -993,6 +993,9 @@ class MenuSystem:
         Returns selected list on Enter (may be empty), None on Q (cancel).
         Controls: UP/DOWN navigate, Space toggle, A=all, N=none, Enter=confirm, Q=cancel.
         """
+        if not resources:
+            return None
+
         selected = set()  # indices of selected resources
         current = 0       # currently highlighted index
 

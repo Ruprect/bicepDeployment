@@ -31,7 +31,7 @@ class WorkflowMappings:
 
     def find_by_azure_name(self, azure_name: str) -> Optional[MappingEntry]:
         entry = self._data.get(azure_name)
-        if entry:
+        if entry is not None:
             return MappingEntry(
                 azure_name=azure_name,
                 workflow_key=entry['workflowKey'],

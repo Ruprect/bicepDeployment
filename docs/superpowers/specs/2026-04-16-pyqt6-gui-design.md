@@ -11,7 +11,7 @@
 ### Principle
 Two independent frontends, one shared service layer.
 
-- `deployScript/` — unchanged. Contains all business logic: `AzureClient`, `BicepManager`, `DeploymentManager`, `ResourceExporter`, `ConfigManager`, `WorkflowMappings`, `WorkflowMappings`.
+- `deployScript/` — unchanged. Contains all business logic: `AzureClient`, `BicepManager`, `DeploymentManager`, `ResourceExporter`, `ConfigManager`, `WorkflowMappings`.
 - `gui/` — new folder. All PyQt6 code lives here. Imports from `deployScript/` for data and state.
 - `deploy.py` — existing CLI entry point, untouched.
 - `python -m gui` — new GUI entry point, launched from the project directory.
@@ -30,7 +30,16 @@ The GUI is launched from the project directory (same as the CLI). On startup it 
 | Workflow key/filename mappings | `WorkflowMappings` |
 
 ### Deployment Subprocess
-`deployment_manager.DeploymentManager.deploy_bicep_template` uses `print`/`input` and cannot be used from a GUI thread. Instead, `DeployWorker` (a `QThread`) constructs and runs `az deployment group create` via `subprocess.Popen` with `stdout=PIPE, stderr=PIPE`, streaming each output line as a Qt signal. The command arguments mirror exactly what the CLI builds today.
+`deployment_manager.DeploymentManager.deploy_bicep_template` uses `print`/`input` and cannot be used from a GUI thread. Instead, `DeployWorker` (a `QThread`) constructs and runs `az deployment group create` via `subprocess.Popen` with `stdout=PIPE, stderr=PIPE`, streaming each output line as a Qt signal.
+
+`DeployWorker.__init__` accepts the following constructor arguments, read from `ConfigManager` at the point the user clicks Deploy:
+
+- `templates: list[Path]` — ordered list of `.bicep` files to deploy
+- `resource_group: str` — from `ConfigManager`
+- `parameters_file: str` — absolute path, from `ConfigManager`
+- `mode: str` — `"Incremental"` or `"Complete"`, from `ConfigManager`
+
+The worker builds: `az deployment group create --resource-group <rg> --mode <mode> --template-file <file> --parameters @<params_file>`
 
 ---
 
@@ -103,7 +112,7 @@ Each row has two states:
 [10:42:10] ⏳ Waiting for Azure response…
 ```
 
-**Auto-expand on failure** — when `DeployWorker` emits an error signal for a row, its log panel opens automatically and the row border turns red.
+**Auto-expand on failure** — when `DeployWorker` emits `template_finished(index, success=False)`, the row's log panel opens automatically and the row border turns red.
 
 **Status icons:**
 | State | Display |
@@ -134,7 +143,7 @@ Form with dropdowns and file pickers, changes applied on widget change (no separ
 | Parameter File | `QComboBox` + 📁 browse | scans `cwd()` for `parameters*.json` |
 | Deployment Mode | `QComboBox` (Incremental / Complete) | `ConfigManager` |
 | Validation | `QComboBox` (All / Changed / Skip) | `ConfigManager` |
-| Re-login | button | runs `az login` in `AzureWorker` |
+| Re-login | button | runs `az login` in `AzureWorker` via `subprocess.Popen` with no stdout/stderr capture, so the OS handles browser redirection. The button is disabled while the subprocess is running. |
 
 Changes are written to `ConfigManager` immediately on widget change and persisted to `.deployment-settings.json`.
 
@@ -148,8 +157,8 @@ A `QListWidget` in drag-and-drop mode (`InternalMove`). Each item shows:
 ```
 
 - **Drag handle** (⠿) — drag rows up/down to reorder. No ▲▼ buttons.
-- **Checkbox** — enable/disable the template.
-- **Save Order** button at the bottom — writes updated order to `BicepManager` and refreshes the Deploy view.
+- **Checkbox** — enable/disable the template. Writes to the same `BicepManager` enabled-state field used by the Deploy view. The Deploy view refreshes automatically when the user navigates back to it.
+- **Save Order** button at the bottom — writes the reordered sequence to `BicepManager` and refreshes the Deploy view.
 
 ---
 
@@ -165,7 +174,7 @@ A `QListWidget` in drag-and-drop mode (`InternalMove`). Each item shows:
 
 **Output folder:** Read-only text field showing `exported/` relative path + 📁 browse button to change it.
 
-**Export flow:** clicking `Export Selected` launches `ResourceExporter.export_resources()` in an `AzureWorker` thread. A progress indicator replaces the toolbar during export. On completion, a summary label shows `Exported N/M resources to exported/YYYY-MM-DD_HHMMSS/`.
+**Export flow:** clicking `Export Selected` launches `ResourceExporter.export_resources()` in an `AzureWorker` thread. A progress indicator replaces the toolbar during export. On completion, `AzureWorker` emits `result(data)` where `data` is a `tuple[int, int]` of `(success_count, total_count)` — the export view uses this to display `Exported N/M resources to exported/YYYY-MM-DD_HHMMSS/`.
 
 ---
 

@@ -10,6 +10,7 @@ from deployScript.bicep_manager import BicepManager
 from deployScript.azure_client import AzureClient
 from deployScript.exporter import ResourceExporter
 from .styles.theme import STYLESHEET
+from .widgets.sidebar import SidebarWidget
 from .views.deploy_view import DeployView
 from .views.config_view import ConfigView
 from .views.reorder_view import ReorderView
@@ -39,6 +40,11 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        self.sidebar = SidebarWidget()
+        self.sidebar.page_changed.connect(self.switch_to_page)
+        self.sidebar.change_folder_requested.connect(self.switch_project)
+        layout.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
         self._build_views()

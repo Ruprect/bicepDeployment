@@ -2,8 +2,11 @@
 
 import sys
 import argparse
+import json
+import re
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 from .logger import logger, LogLevel, Color
 from .config import ConfigManager
@@ -12,6 +15,8 @@ from .bicep_manager import BicepManager
 from .deployment import DeploymentManager
 from .menu import MenuSystem
 from .exporter import ResourceExporter
+from .workflow_mappings import WorkflowMappings
+from .header_generator import _load_params
 
 
 class DeployScript:
@@ -218,6 +223,160 @@ class DeployScript:
         count = self.bicep_manager.refresh_file_list()
         logger.log(f"File list refreshed. Found {count} template(s).", LogLevel.INFO, Color.GREEN)
 
+    def _resolve_workflow_mapping_for_resource(
+        self,
+        resource,
+        wm: WorkflowMappings,
+        workflow_names: dict,
+    ) -> None:
+        """
+        If the resource is a Logic App with no existing mapping, show the picklist
+        and save the result. Updates parameters.local.json and wm in-place.
+        """
+        if 'Microsoft.Logic/workflows' not in resource.resource_type:
+            return
+        if wm.find_by_azure_name(resource.name):
+            return  # already mapped
+
+        result = self.menu_system.show_workflow_mapping_picklist(resource.name, workflow_names)
+        if result is None:
+            return  # user skipped
+
+        key, is_new = result
+
+        if is_new:
+            filename = f"workflows-{resource.name}"
+        else:
+            filename = self._find_bicep_filename_for_key(key) or f"workflows-{resource.name}"
+
+        wm.add(resource.name, key, filename)
+        wm.save()
+
+        self._upsert_workflow_name_in_params(key, resource.name)
+        workflow_names[key] = resource.name  # keep in-memory dict in sync
+
+    def _find_bicep_filename_for_key(self, workflow_key: str) -> Optional[str]:
+        """Scan bicep/ folder for a file referencing workflowNames.<key>. Returns stem or None."""
+        bicep_dir = Path("bicep")
+        if not bicep_dir.is_dir():
+            return None
+        pattern = re.compile(rf'\bworkflowNames\.{re.escape(workflow_key)}\b')
+        for f in bicep_dir.glob("*.bicep"):
+            try:
+                if pattern.search(f.read_text(encoding='utf-8')):
+                    return f.stem
+            except OSError:
+                pass
+        return None
+
+    def _upsert_workflow_name_in_params(self, key: str, azure_name: str) -> None:
+        """Update workflowNames.<key> = azure_name in parameters.local.json."""
+        params_file = Path("parameters.local.json")
+        if not params_file.exists():
+            return
+        try:
+            data = json.loads(params_file.read_text(encoding='utf-8'))
+            wn = data.setdefault('parameters', {}).setdefault('workflowNames', {})
+            if 'value' not in wn:
+                wn['value'] = {}
+            wn['value'][key] = azure_name
+            params_file.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        except (json.JSONDecodeError, OSError) as e:
+            logger.log(f"Could not update parameters.local.json: {e}", LogLevel.WARN, Color.YELLOW)
+
+    def _check_logic_app_name_conflict(
+        self,
+        template,
+        mode: str,
+        rg: str,
+        wm: WorkflowMappings,
+    ) -> str:
+        """
+        For Incremental deployments of Logic App bicep files:
+        check if the expected resource name differs from an existing one in Azure.
+
+        Returns: 'proceed' | 'skip' | 'use-exported'
+        """
+        if mode == 'Complete':
+            return 'proceed'
+
+        entry = wm.find_by_filename(template.file.stem)
+        if not entry:
+            return 'proceed'
+
+        params_file = Path("parameters.local.json")
+        if not params_file.exists():
+            return 'proceed'
+
+        try:
+            params = _load_params(params_file)
+            environment = params.get('environment', '')
+            project_suffix = params.get('projectSuffix', '')
+            workflow_names = params.get('workflowNames', {})
+            workflow_value = workflow_names.get(entry.workflow_key, '')
+            expected_name = f"la-{environment}-{project_suffix}{workflow_value}"
+        except (KeyError, OSError):
+            return 'proceed'
+
+        existing = self.azure_client.list_resource_group_resources(rg)
+        existing_names = {r.name for r in existing}
+
+        if expected_name in existing_names:
+            return 'proceed'  # resource exists with correct name
+
+        if entry.azure_name not in existing_names:
+            return 'proceed'  # fresh RG — no conflict
+
+        # Conflict: old name exists, new name doesn't
+        print()
+        logger.log(
+            f"⚠  Resource '{entry.azure_name}' exists but template will create '{expected_name}'",
+            LogLevel.WARN, Color.YELLOW,
+        )
+        logger.log("   This creates a NEW resource rather than updating the existing one.", LogLevel.WARN, Color.YELLOW)
+        print()
+        print("  [S] Skip this file")
+        print("  [U] Use exported name for this deployment (not saved)")
+        print("  [C] Continue anyway")
+        print()
+        choice = input("  Choice [S/U/C]: ").strip().upper()
+
+        if choice == 'S':
+            return 'skip'
+        if choice == 'U':
+            return 'use-exported'
+        return 'proceed'
+
+    def _deploy_with_name_override(
+        self,
+        template,
+        mode: str,
+        rg: str,
+        wm: WorkflowMappings,
+        prompt_mode: str = "prompt",
+    ) -> object:
+        """Deploy template with workflowNames.<key> temporarily overridden to the exported Azure name."""
+        entry = wm.find_by_filename(template.file.stem)
+        params_file = Path("parameters.local.json")
+        tmp_params = params_file.parent / "_tmp_deploy_params.json"
+
+        try:
+            data = json.loads(params_file.read_text(encoding='utf-8'))
+            wn = data.setdefault('parameters', {}).setdefault('workflowNames', {})
+            wn.setdefault('value', {})[entry.workflow_key] = entry.azure_name
+            tmp_params.write_text(json.dumps(data, indent=2), encoding='utf-8')
+
+            return self.deployment_manager.deploy_bicep_template(
+                template.file, mode, template.name, rg,
+                str(tmp_params), prompt_mode,
+                skip_validation=False,
+                validation_mode=self.validation_mode,
+                template_needs_redeployment=template.needs_redeployment,
+            )
+        finally:
+            if tmp_params.exists():
+                tmp_params.unlink()
+
     def _handle_export_resources(self):
         """Handle exporting Azure Resource Group resources as individual Bicep files."""
         # Pre-flight: login check
@@ -269,19 +428,41 @@ class DeployScript:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         output_dir = Path("exported") / timestamp
 
-        # Export
-        success, total = self.exporter.export_resources(selected, output_dir)
+        # Load mappings and parameter names for pre-pass
+        wm = WorkflowMappings().load()
+        params_file = Path("parameters.local.json")
+        workflow_names = {}
+        if params_file.exists():
+            try:
+                data = json.loads(params_file.read_text(encoding='utf-8'))
+                workflow_names = data.get('parameters', {}).get('workflowNames', {}).get('value', {})
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Pre-pass: resolve mappings for all Logic Apps before starting spinner
+        for resource in selected:
+            self._resolve_workflow_mapping_for_resource(resource, wm, workflow_names)
+
+        # Export (with spinner)
+        success, total = logger.show_progress_spinner(
+            f"Exporting {len(selected)} resource(s)",
+            self.exporter.export_resources,
+            selected,
+            output_dir,
+            workflow_mappings=wm,
+            parameters_file=params_file,
+        )
 
         # Summary
         print()
         if success == total:
             logger.log(
-                f"Exported {success}/{total} resources to {output_dir}/",
+                f"Exported {success}/{total} resources to {output_dir}",
                 LogLevel.SUCCESS, Color.GREEN
             )
         else:
             logger.log(
-                f"Exported {success}/{total} resources to {output_dir}/ ({total - success} failed — see above)",
+                f"Exported {success}/{total} resources to {output_dir} ({total - success} failed — see above)",
                 LogLevel.WARN, Color.YELLOW
             )
         input("Press Enter to continue...")
@@ -455,22 +636,37 @@ class DeployScript:
         failed = 0
         skipped = 0
 
+        wm = WorkflowMappings().load()
+
         for i, (num, template) in enumerate(selected_templates, 1):
             # Template header
             logger.log(f"{Color.CYAN}▶{Color.RESET} [{i}/{len(selected_templates)}] Template: {Color.CYAN}{template.name}{Color.RESET}", LogLevel.INFO, Color.WHITE)
 
             # Deploy
-            deploy_result = self.deployment_manager.deploy_bicep_template(
-                template.file,
-                mode,
-                template.name,
-                self.get_effective_resource_group(),
-                self.selected_parameter_file,
-                prompt_mode,
-                skip_validation=False,
-                validation_mode=self.validation_mode,
-                template_needs_redeployment=template.needs_redeployment
+            conflict_action = self._check_logic_app_name_conflict(
+                template, mode, self.get_effective_resource_group(), wm
             )
+            if conflict_action == 'skip':
+                logger.log(f"Skipped: {template.name}", LogLevel.INFO, Color.YELLOW)
+                skipped += 1
+                continue
+            elif conflict_action == 'use-exported':
+                deploy_result = self._deploy_with_name_override(
+                    template, mode, self.get_effective_resource_group(), wm,
+                    prompt_mode=prompt_mode
+                )
+            else:
+                deploy_result = self.deployment_manager.deploy_bicep_template(
+                    template.file,
+                    mode,
+                    template.name,
+                    self.get_effective_resource_group(),
+                    self.selected_parameter_file,
+                    prompt_mode,
+                    skip_validation=False,
+                    validation_mode=self.validation_mode,
+                    template_needs_redeployment=template.needs_redeployment
+                )
 
             # Track results
             if deploy_result is True:
@@ -569,19 +765,31 @@ class DeployScript:
         
         # Template header
         logger.log(f"{Color.CYAN}▶{Color.RESET} Template: {Color.CYAN}{selected_template.name}{Color.RESET}", LogLevel.INFO, Color.WHITE)
-        
-        # Deploy
-        deploy_result = self.deployment_manager.deploy_bicep_template(
-            selected_template.file,
-            mode,
-            selected_template.name,
-            self.get_effective_resource_group(),
-            self.selected_parameter_file,
-            "prompt",
-            skip_validation=False,
-            validation_mode=self.validation_mode,
-            template_needs_redeployment=selected_template.needs_redeployment
+
+        # Pre-flight: Logic App naming conflict check
+        wm = WorkflowMappings().load()
+        conflict_action = self._check_logic_app_name_conflict(
+            selected_template, mode, self.get_effective_resource_group(), wm
         )
+        if conflict_action == 'skip':
+            logger.log(f"Skipped: {selected_template.name}", LogLevel.INFO, Color.YELLOW)
+            return
+        elif conflict_action == 'use-exported':
+            deploy_result = self._deploy_with_name_override(
+                selected_template, mode, self.get_effective_resource_group(), wm
+            )
+        else:
+            deploy_result = self.deployment_manager.deploy_bicep_template(
+                selected_template.file,
+                mode,
+                selected_template.name,
+                self.get_effective_resource_group(),
+                self.selected_parameter_file,
+                "prompt",
+                skip_validation=False,
+                validation_mode=self.validation_mode,
+                template_needs_redeployment=selected_template.needs_redeployment
+            )
         
         # Set deployment result for menu display
         if deploy_result is True:

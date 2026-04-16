@@ -1,7 +1,7 @@
 # gui/widgets/template_row.py
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QCheckBox,
-    QPushButton, QProgressBar, QTextEdit, QSizePolicy
+    QPushButton, QProgressBar, QTextEdit, QSizePolicy, QGraphicsOpacityEffect
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QColor
@@ -14,10 +14,10 @@ def _status_text(template) -> tuple[str, str]:
         return "— Disabled", Color.MUTED
     if template.last_deployment_success is True and not template.needs_redeployment:
         return "✅ Up to date", Color.SUCCESS
-    if template.needs_redeployment or template.last_file_hash is None:
-        return "🟡 Changed", Color.WARNING
     if template.last_deployment_success is False:
         return "❌ Failed", Color.ERROR
+    if template.needs_redeployment or template.last_file_hash is None:
+        return "🟡 Changed", Color.WARNING
     return "⚪ Never deployed", Color.MUTED
 
 
@@ -114,8 +114,10 @@ class TemplateRowWidget(QWidget):
         text, color = _status_text(self.template)
         self._status_label.setText(text)
         self._status_label.setStyleSheet(f"color: {color}; min-width: 120px; text-align: right;")
-        faded = not self.template.enabled
-        self.setStyleSheet("opacity: 0.45;" if faded else "")
+
+        effect = QGraphicsOpacityEffect(self)
+        effect.setOpacity(0.45 if not self.template.enabled else 1.0)
+        self.setGraphicsEffect(effect)
 
     def toggle_log(self):
         self._expanded = not self._expanded

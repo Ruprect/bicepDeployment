@@ -88,7 +88,7 @@ class BicepManager:
     
     def get_bicep_files(self) -> List[BicepTemplate]:
         """Discover and return all Bicep template files."""
-        bicep_files = list(Path(".").glob("*.bicep"))
+        bicep_files = list(Path(".").glob("*.bicep")) + list(Path("bicep").glob("*.bicep") if Path("bicep").is_dir() else [])
         
         # Load deployment settings to get file order and status
         settings = self.config_manager.load_deployment_settings()

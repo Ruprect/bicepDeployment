@@ -1,3 +1,5 @@
 # Requirements for the Python deployment script
 # Optional: colorama for Windows color support
 colorama>=0.4.4
+PyQt6>=6.6.0
+pytest-qt>=4.4.0

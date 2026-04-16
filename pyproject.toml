@@ -1,0 +1,16 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bicep-deploy"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["PyQt6>=6.6.0", "colorama>=0.4.4"]
+
+[project.scripts]
+bicep-gui = "gui:main"
+
+[tool.setuptools.packages.find]
+include = ["gui*", "deployScript*"]

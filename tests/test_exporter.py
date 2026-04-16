@@ -109,3 +109,54 @@ def test_wrap_produces_valid_arm_envelope():
     assert result["$schema"] == "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#"
     assert result["contentVersion"] == "1.0.0.0"
     assert result["resources"] == [resource]
+
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+from deployScript.workflow_mappings import WorkflowMappings
+
+
+def _make_params_file(tmp_path, extra=None):
+    params = {
+        "environment": {"value": "dev"},
+        "projectSuffix": {"value": "la-"},
+        "workflowNames": {"value": {}},
+        "logicAppState": {"value": "Disabled"},
+    }
+    if extra:
+        params.update(extra)
+    p = tmp_path / "parameters.local.json"
+    p.write_text(json.dumps({"$schema": "...", "contentVersion": "1.0.0.0", "parameters": params}))
+    return p
+
+
+def test_export_uses_mapped_filename(tmp_path):
+    """When a mapping exists, the output file should use mapping.filename."""
+    from deployScript.exporter import ResourceExporter
+
+    wm = WorkflowMappings(tmp_path / ".workflow-mappings.json").load()
+    wm.add("GetCustomers", "bcCustomers", "11.1-GetCustomers")
+
+    exporter = ResourceExporter(MagicMock(), MagicMock())
+
+    resource = MagicMock()
+    resource.resource_type = "Microsoft.Logic/workflows"
+    resource.name = "GetCustomers"
+
+    stem = exporter._resolve_export_stem(resource, wm)
+    assert stem == "11.1-GetCustomers"
+
+
+def test_export_uses_default_stem_when_no_mapping(tmp_path):
+    from deployScript.exporter import ResourceExporter
+
+    wm = WorkflowMappings(tmp_path / ".workflow-mappings.json").load()
+    exporter = ResourceExporter(MagicMock(), MagicMock())
+
+    resource = MagicMock()
+    resource.resource_type = "Microsoft.Logic/workflows"
+    resource.name = "GetCustomers"
+
+    stem = exporter._resolve_export_stem(resource, wm)
+    assert stem == "workflows-GetCustomers"

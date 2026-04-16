@@ -1,10 +1,13 @@
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
 from .logger import logger, LogLevel, Color
+from .workflow_mappings import WorkflowMappings, MappingEntry
+from .header_generator import generate_logic_app_header, generate_keyvault_header
 
 if TYPE_CHECKING:
     from .azure_client import AzureClient, AzureResource
@@ -31,7 +34,9 @@ class ResourceExporter:
     def export_resources(
         self,
         selected_resources: List['AzureResource'],
-        output_dir: Path
+        output_dir: Path,
+        workflow_mappings: Optional['WorkflowMappings'] = None,
+        parameters_file: Optional[Path] = None,
     ) -> Tuple[int, int]:
         """Export each selected resource as a .bicep file. Creates output_dir. Returns (success, total)."""
         try:
@@ -43,17 +48,16 @@ class ResourceExporter:
         success = 0
         total = len(selected_resources)
 
+        resource_group = self.config_manager.get_resource_group()
+
         for resource in selected_resources:
-            stem = self._make_output_filename(resource.resource_type, resource.name)
+            stem = self._resolve_export_stem(resource, workflow_mappings)
             dest_bicep = output_dir / f"{stem}.bicep"
 
-            arm_json = self._fetch_arm_json(resource.resource_id)
-            if arm_json is None:
-                logger.log(f"❌ {resource.name}: failed to fetch ARM JSON", LogLevel.ERROR, Color.RED)
+            template = self._fetch_arm_template(resource_group, resource.resource_id)
+            if template is None:
+                logger.log(f"❌ {resource.name}: failed to fetch ARM template", LogLevel.ERROR, Color.RED)
                 continue
-
-            sanitized = self._sanitize_resource_for_arm(arm_json)
-            template = self._wrap_arm_template(sanitized)
 
             tmp_path = output_dir / f"_tmp_{stem}.json"
             try:
@@ -64,6 +68,8 @@ class ResourceExporter:
 
             ok, reason = self._decompile_to_bicep(tmp_path, dest_bicep)
             if ok:
+                self._parameterize_location(dest_bicep)
+                self._apply_standard_header(dest_bicep, workflow_mappings, parameters_file)
                 logger.log(f"✅ {stem}.bicep", LogLevel.SUCCESS, Color.GREEN)
                 success += 1
             else:
@@ -81,8 +87,20 @@ class ResourceExporter:
 
         return success, total
 
-    def _fetch_arm_json(self, resource_id: str) -> Optional[dict]:
-        return self.azure_client.get_resource_arm_json(resource_id)
+    def _fetch_arm_template(self, resource_group: str, resource_id: str) -> Optional[dict]:
+        """Fetch complete ARM template for a resource via az group export (includes apiVersion)."""
+        try:
+            az_cmd = self.azure_client._get_az_command()
+            result = subprocess.run(
+                [az_cmd, 'group', 'export', '--name', resource_group,
+                 '--resource-ids', resource_id],
+                capture_output=True, text=True, check=False
+            )
+            if result.returncode != 0:
+                return None
+            return json.loads(result.stdout)
+        except (subprocess.SubprocessError, json.JSONDecodeError):
+            return None
 
     def _sanitize_resource_for_arm(self, resource_json: dict) -> dict:
         """Strip Azure-internal fields that cause az bicep decompile to fail or warn."""
@@ -116,7 +134,10 @@ class ResourceExporter:
                 capture_output=True, text=True, check=False
             )
             failed = result.returncode != 0
-            warned = not failed and ('WARNING' in result.stderr or 'Could not' in result.stderr)
+            warned = not failed and (
+                'Decompilation failed' in result.stderr
+                or 'Could not decompile' in result.stderr
+            )
 
             if failed or warned:
                 reason = (result.stderr or result.stdout).strip()
@@ -140,6 +161,68 @@ class ResourceExporter:
                         produced_bicep.unlink()
                 except OSError:
                     pass
+
+    def _parameterize_location(self, bicep_path: Path) -> None:
+        """Replace hardcoded location strings with resourceGroup().location."""
+        try:
+            text = bicep_path.read_text(encoding='utf-8')
+            updated = re.sub(
+                r"((?:param\s+location\s+string\s*=\s*|^\s*location:\s*))'[^']*'",
+                r"\1resourceGroup().location",
+                text,
+                flags=re.MULTILINE
+            )
+            if updated != text:
+                bicep_path.write_text(updated, encoding='utf-8')
+        except OSError:
+            pass
+
+    def _resolve_export_stem(self, resource: 'AzureResource', workflow_mappings: Optional['WorkflowMappings']) -> str:
+        """Return the output filename stem for a resource, using mapping if available."""
+        if workflow_mappings and 'Microsoft.Logic/workflows' in resource.resource_type:
+            entry = workflow_mappings.find_by_azure_name(resource.name)
+            if entry:
+                return entry.filename
+        return self._make_output_filename(resource.resource_type, resource.name)
+
+    def _apply_standard_header(
+        self,
+        bicep_path: Path,
+        workflow_mappings: Optional['WorkflowMappings'],
+        parameters_file: Optional[Path],
+    ) -> None:
+        """Apply standard param/var header using parameters.local.json."""
+        if parameters_file is None or not parameters_file.exists():
+            return
+        try:
+            text = bicep_path.read_text(encoding='utf-8')
+
+            if 'Microsoft.Logic/workflows' in text:
+                # Strip only the generated name param and logicAppState (both regenerated by header)
+                body = re.sub(r'^param workflows_\w+ string\n?', '', text, flags=re.MULTILINE)
+                body = re.sub(r'^param logicAppState string[^\n]*\n?', '', body, flags=re.MULTILINE)
+                workflow_key = None
+                if workflow_mappings:
+                    stem = bicep_path.stem
+                    entry = workflow_mappings.find_by_filename(stem)
+                    if entry:
+                        workflow_key = entry.workflow_key
+                # Replace hardcoded state and resource name with parameter/var references
+                body = re.sub(r"state:\s*'[^']+'", 'state: logicAppState', body)
+                body = re.sub(r'\bname:\s*workflows_\w+\b', 'name: nameOfLogicApp', body)
+                header = generate_logic_app_header(body, parameters_file, workflow_key)
+
+            elif 'Microsoft.KeyVault/vaults' in text:
+                body = re.sub(r'^param vaults_\w+ string\n?', '', text, flags=re.MULTILINE)
+                body = re.sub(r'\bname:\s*vaults_\w+\b', 'name: nameOfKeyVault', body)
+                header = generate_keyvault_header(body, parameters_file)
+
+            else:
+                return  # unknown resource type, leave as-is
+
+            bicep_path.write_text(header + body.lstrip('\n'), encoding='utf-8')
+        except OSError:
+            pass
 
     def _make_output_filename(self, resource_type: str, name: str) -> str:
         """'Microsoft.Storage/storageAccounts' + 'myaccount' -> 'storageaccounts-myaccount'"""

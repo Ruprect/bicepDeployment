@@ -989,42 +989,80 @@ class MenuSystem:
 
     def show_export_picklist(self, resources: List[AzureResource]) -> Optional[List[AzureResource]]:
         """
-        Show a multi-select picklist of Azure resources.
+        Show a grouped multi-select picklist of Azure resources.
+        Resources are grouped by type. Space on a group header toggles all in that group.
         Returns selected list on Enter (may be empty), None on Q (cancel).
-        Controls: UP/DOWN navigate, Space toggle, A=all, N=none, Enter=confirm, Q=cancel.
+        Controls: UP/DOWN navigate, Space toggle/group, A=all, N=none, Enter=confirm, Q=cancel.
         """
         if not resources:
             return None
 
-        selected = set()  # indices of selected resources
-        current = 0       # currently highlighted index
+        # Group resources by type slug, preserving insertion order
+        groups = {}  # type_slug -> list of (original_index, resource)
+        for i, resource in enumerate(resources):
+            type_slug = resource.resource_type.split("/")[-1]
+            if type_slug not in groups:
+                groups[type_slug] = []
+            groups[type_slug].append((i, resource))
+
+        # Build flat navigation list: alternating headers and their resources
+        # item: {'kind': 'header', 'type_slug': str, 'indices': List[int]}
+        #    or {'kind': 'resource', 'index': int, 'resource': AzureResource}
+        items = []
+        for type_slug, group_resources in groups.items():
+            indices = [i for i, _ in group_resources]
+            items.append({'kind': 'header', 'type_slug': type_slug, 'indices': indices})
+            for orig_idx, resource in group_resources:
+                items.append({'kind': 'resource', 'index': orig_idx, 'resource': resource})
+
+        # Determine location display (show once at top)
+        locations = sorted({r.location for r in resources})
+        location_text = locations[0] if len(locations) == 1 else ", ".join(locations)
+
+        selected = set()  # indices into original resources list
+        current = 0       # current position in flat items list
 
         while True:
             self.clear_screen()
             console_width = self._get_console_width()
             separator = "=" * console_width
 
-            header = "EXPORT FROM AZURE — SELECT RESOURCES"
-            padding = (console_width - len(header)) // 2
+            title = "EXPORT FROM AZURE — SELECT RESOURCES"
+            padding = (console_width - len(title)) // 2
             print(separator)
-            print(" " * padding + header)
+            print(" " * padding + title)
             print(separator)
-            print()
-            print(f"  {Color.GRAY}UP/DOWN navigate  |  Space toggle  |  [A] all  |  [N] none  |  Enter confirm  |  [Q] cancel{Color.RESET}")
-            print()
+            print(f"\n  {Color.GRAY}Location: {location_text}{Color.RESET}")
+            print(f"\n  {Color.GRAY}UP/DOWN  |  Space toggle/group  |  [A] all  |  [N] none  |  Enter confirm  |  [Q] cancel{Color.RESET}\n")
 
-            for i, resource in enumerate(resources):
-                check = f"{Color.GREEN}✓{Color.RESET}" if i in selected else " "
-                type_slug = resource.resource_type.split("/")[-1]
-                row = f"[{check}] {resource.name}  {Color.GRAY}|  {type_slug}  |  {resource.location}{Color.RESET}"
-                if i == current:
-                    print(f"  {Color.CYAN}→{Color.RESET} {row}")
+            prev_was_header = False
+            for item_idx, item in enumerate(items):
+                is_current = item_idx == current
+
+                if item['kind'] == 'header':
+                    # Blank line between groups (not before the first)
+                    if prev_was_header is False and item_idx > 0:
+                        print()
+                    indices = item['indices']
+                    n_sel = sum(1 for i in indices if i in selected)
+                    if n_sel == len(indices):
+                        check = f"{Color.GREEN}✓{Color.RESET}"
+                    elif n_sel > 0:
+                        check = f"{Color.YELLOW}~{Color.RESET}"
+                    else:
+                        check = " "
+                    leader = f"{Color.CYAN}→{Color.RESET}" if is_current else " "
+                    label = f"[{check}] {Color.WHITE}{item['type_slug']}{Color.RESET}  {Color.GRAY}({len(indices)}){Color.RESET}"
+                    print(f"{leader} {label}")
+                    prev_was_header = True
                 else:
-                    print(f"    {row}")
+                    orig_idx = item['index']
+                    check = f"{Color.GREEN}✓{Color.RESET}" if orig_idx in selected else " "
+                    leader = f"{Color.CYAN}→{Color.RESET}" if is_current else " "
+                    print(f"    {leader} [{check}] {item['resource'].name}")
+                    prev_was_header = False
 
-            print()
-            count = len(selected)
-            print(f"  {Color.CYAN}{count} selected{Color.RESET}")
+            print(f"\n  {Color.CYAN}{len(selected)} selected{Color.RESET}")
             print(separator)
 
             key = self._get_key()
@@ -1032,12 +1070,21 @@ class MenuSystem:
             if key == 'UP':
                 current = max(0, current - 1)
             elif key == 'DOWN':
-                current = min(len(resources) - 1, current + 1)
+                current = min(len(items) - 1, current + 1)
             elif key == ' ':
-                if current in selected:
-                    selected.discard(current)
+                item = items[current]
+                if item['kind'] == 'header':
+                    group_indices = set(item['indices'])
+                    if group_indices.issubset(selected):
+                        selected -= group_indices   # all selected → deselect all
+                    else:
+                        selected |= group_indices   # partial or none → select all
                 else:
-                    selected.add(current)
+                    idx = item['index']
+                    if idx in selected:
+                        selected.discard(idx)
+                    else:
+                        selected.add(idx)
             elif key == 'A':
                 selected = set(range(len(resources)))
             elif key == 'N':
@@ -1047,3 +1094,58 @@ class MenuSystem:
             elif key in ('Q', 'ESC'):
                 return None
 
+    def show_workflow_mapping_picklist(
+        self,
+        azure_name: str,
+        workflow_names: dict,
+    ) -> Optional[tuple]:
+        """
+        Show a single-select picklist for mapping an Azure resource name to a workflowNames key.
+
+        workflow_names: dict of {key: value} from parameters.local.json workflowNames.value
+        Returns (workflow_key, is_new) where is_new=True if the user typed a new key.
+        Returns None if the user skipped with Q.
+        """
+        keys = list(workflow_names.keys())
+        NEW_KEY_SENTINEL = '__new__'
+        items = keys + [NEW_KEY_SENTINEL]
+        current = 0
+
+        while True:
+            self.clear_screen()
+            console_width = self._get_console_width()
+            separator = '=' * console_width
+            print(separator)
+            print(f"  No mapping found for '{Color.CYAN}{azure_name}{Color.RESET}'")
+            print(f"  Select the {Color.WHITE}workflowNames{Color.RESET} key this workflow maps to:")
+            print(separator)
+            print(f"  {Color.GRAY}UP/DOWN navigate   Enter select   Q skip{Color.RESET}\n")
+
+            for i, item in enumerate(items):
+                leader = f"{Color.CYAN}▶{Color.RESET}" if i == current else " "
+                if item == NEW_KEY_SENTINEL:
+                    print(f"  {leader}  {Color.YELLOW}[ New key ]{Color.RESET}")
+                else:
+                    value = workflow_names[item]
+                    print(f"  {leader}  {Color.WHITE}{item:<30}{Color.RESET}  {Color.GRAY}→ {value}{Color.RESET}")
+
+            print(f"\n{separator}")
+
+            key = self._get_key()
+
+            if key == 'UP':
+                current = max(0, current - 1)
+            elif key == 'DOWN':
+                current = min(len(items) - 1, current + 1)
+            elif key == 'ENTER':
+                selected = items[current]
+                if selected == NEW_KEY_SENTINEL:
+                    print()
+                    new_key = input("  Enter new camelCase key name: ").strip()
+                    if new_key:
+                        return (new_key, True)
+                    # empty input → go back to picklist
+                else:
+                    return (selected, False)
+            elif key in ('Q', 'ESC'):
+                return None

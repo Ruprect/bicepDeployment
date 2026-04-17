@@ -15,6 +15,7 @@ from .views.deploy_view import DeployView
 from .views.config_view import ConfigView
 from .views.reorder_view import ReorderView
 from .views.export_view import ExportView
+from .workers.deploy_worker import DeployWorker
 
 
 class MainWindow(QMainWindow):
@@ -61,6 +62,7 @@ class MainWindow(QMainWindow):
             self.stack.removeWidget(self.stack.widget(0))
 
         self.deploy_view = DeployView(self.project_dir, self.config_manager, self.bicep_manager)
+        self.deploy_view.deploy_requested.connect(self._start_deploy)
         self.config_view = ConfigView(self.project_dir, self.config_manager, self.azure_client)
         self.reorder_view = ReorderView(self.project_dir, self.config_manager, self.bicep_manager)
         self.export_view = ExportView(self.project_dir, self.config_manager, self.azure_client, self.exporter)
@@ -69,6 +71,66 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.config_view)    # index 1
         self.stack.addWidget(self.reorder_view)   # index 2
         self.stack.addWidget(self.export_view)    # index 3
+
+        self._deploy_worker: DeployWorker | None = None
+
+    def _start_deploy(self, templates: list):
+        if self._deploy_worker and self._deploy_worker.isRunning():
+            return  # already running
+
+        rg = self.config_manager.get_resource_group() or ""
+        params = self.config_manager.get_parameter_files()
+        params_file = str(params[0].resolve()) if params else ""
+        mode = self.config_manager.get_validation_mode() or "Incremental"
+
+        # Map template index back to row index (templates are a subset of all rows)
+        all_templates = self.bicep_manager.get_bicep_files()
+        template_names = {t.name for t in templates}
+        row_indices = [i for i, t in enumerate(all_templates) if t.name in template_names]
+
+        self._deploy_worker = DeployWorker(
+            templates=[t.file for t in templates],
+            resource_group=rg,
+            parameters_file=params_file,
+            mode=mode,
+        )
+        self._deploy_worker.template_started.connect(
+            lambda worker_idx: self._on_template_started(row_indices[worker_idx])
+        )
+        self._deploy_worker.line_output.connect(
+            lambda worker_idx, line: self._on_line_output(row_indices[worker_idx], line)
+        )
+        self._deploy_worker.template_finished.connect(
+            lambda worker_idx, success: self._on_template_finished(row_indices[worker_idx], success)
+        )
+        self._deploy_worker.all_finished.connect(self._on_all_finished)
+        self.deploy_view.set_buttons_enabled(False)
+        self._deploy_worker.start()
+
+    def _on_template_started(self, row_index: int):
+        row = self.deploy_view.get_row_for_index(row_index)
+        if row:
+            row.set_deploying(True)
+        self.statusBar().showMessage(f"⏳ Deploying template {row_index + 1}…")
+
+    def _on_line_output(self, row_index: int, line: str):
+        row = self.deploy_view.get_row_for_index(row_index)
+        if row:
+            row.append_log(line)
+
+    def _on_template_finished(self, row_index: int, success: bool):
+        row = self.deploy_view.get_row_for_index(row_index)
+        if row:
+            row.set_deploying(False)
+            if success:
+                row.set_succeeded()
+            else:
+                row.set_failed()
+
+    def _on_all_finished(self):
+        self.deploy_view.set_buttons_enabled(True)
+        self._update_status_bar()
+        self.deploy_view.refresh()
 
     def switch_to_page(self, index: int):
         self.stack.setCurrentIndex(index)

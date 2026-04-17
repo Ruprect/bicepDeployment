@@ -168,6 +168,7 @@ class ConfigView(QWidget):
         sub_id = self._sub_combo.itemData(idx)
         if sub_id:
             self.config_manager.set_subscription(sub_id)
+            self._refresh_resource_groups()
 
     def _browse_params(self):
         from PyQt6.QtWidgets import QFileDialog

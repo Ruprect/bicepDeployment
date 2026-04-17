@@ -77,3 +77,17 @@ def test_reorder_view_loads(qtbot):
     view = ReorderView(Path("d:/repos/NewBicep"), MagicMock(), bm)
     qtbot.addWidget(view)
     assert view._list.count() == 0
+
+
+def test_export_view_loads(qtbot):
+    from gui.views.export_view import ExportView
+    from unittest.mock import MagicMock
+    from pathlib import Path
+
+    view = ExportView(
+        Path("d:/repos/NewBicep"),
+        MagicMock(), MagicMock(), MagicMock()
+    )
+    qtbot.addWidget(view)
+    assert view._list.count() == 0
+    assert not view._export_btn.isEnabled()

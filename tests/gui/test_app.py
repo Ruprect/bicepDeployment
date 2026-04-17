@@ -49,3 +49,19 @@ def test_template_row_instantiates(qtbot):
     assert not row._expanded
     row.toggle_log()
     assert row._expanded
+
+
+def test_deploy_view_loads_templates(qtbot):
+    from gui.views.deploy_view import DeployView
+    from unittest.mock import MagicMock
+    from pathlib import Path
+
+    bicep_manager = MagicMock()
+    bicep_manager.get_bicep_files.return_value = []
+    config_manager = MagicMock()
+    config_manager.get_validation_mode.return_value = "Changed"
+
+    view = DeployView(Path("d:/repos/NewBicep"), config_manager, bicep_manager)
+    qtbot.addWidget(view)
+    assert len(view._rows) == 0
+    bicep_manager.get_bicep_files.assert_called_once()

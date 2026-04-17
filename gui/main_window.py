@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         self.deploy_view.deploy_requested.connect(self._start_deploy)
         self.config_view = ConfigView(self.project_dir, self.config_manager, self.azure_client)
         self.reorder_view = ReorderView(self.project_dir, self.config_manager, self.bicep_manager)
+        self.reorder_view.order_saved.connect(self.deploy_view.refresh)
         self.export_view = ExportView(self.project_dir, self.config_manager, self.azure_client, self.exporter)
 
         self.stack.addWidget(self.deploy_view)    # index 0

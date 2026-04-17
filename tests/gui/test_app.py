@@ -65,3 +65,15 @@ def test_deploy_view_loads_templates(qtbot):
     qtbot.addWidget(view)
     assert len(view._rows) == 0
     bicep_manager.get_bicep_files.assert_called_once()
+
+
+def test_reorder_view_loads(qtbot):
+    from gui.views.reorder_view import ReorderView
+    from unittest.mock import MagicMock
+    from pathlib import Path
+
+    bm = MagicMock()
+    bm.get_bicep_files.return_value = []
+    view = ReorderView(Path("d:/repos/NewBicep"), MagicMock(), bm)
+    qtbot.addWidget(view)
+    assert view._list.count() == 0

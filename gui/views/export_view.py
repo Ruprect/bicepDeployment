@@ -1,10 +1,12 @@
 # gui/views/export_view.py
+import datetime
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QCheckBox, QFileDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt
+from deployScript.workflow_mappings import WorkflowMappings
 from ..workers.azure_worker import AzureWorker
 from ..styles.theme import Color
 
@@ -109,9 +111,9 @@ class ExportView(QWidget):
         self._resources = resources
         # Sort: Logic Apps first, Key Vaults second, rest alphabetically
         def sort_key(r):
-            if "Logic/workflows" in r.resource_type:
+            if "Microsoft.Logic/workflows" in r.resource_type:
                 return (0, r.name)
-            if "KeyVault/vaults" in r.resource_type:
+            if "Microsoft.KeyVault/vaults" in r.resource_type:
                 return (1, r.name)
             return (2, r.name)
 
@@ -180,12 +182,10 @@ class ExportView(QWidget):
         self._export_btn.setEnabled(False)
         self._export_btn.setText("📥  Exporting…")
 
-        from deployScript.workflow_mappings import WorkflowMappings
         wm = WorkflowMappings().load()
         params_files = self.config_manager.get_parameter_files()
         params_file = params_files[0] if params_files else None
 
-        import datetime
         output_dir = self._output_dir / datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
         output_dir.mkdir(parents=True, exist_ok=True)
 

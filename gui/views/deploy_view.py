@@ -20,7 +20,8 @@ class DeployView(QWidget):
         self.config_manager = config_manager
         self.bicep_manager = bicep_manager
         self._rows: list[TemplateRowWidget] = []
-        self._validation_idx = 0
+        stored_mode = config_manager.get_validation_mode() or "Changed"
+        self._validation_idx = _VALIDATION_MODES.index(stored_mode) if stored_mode in _VALIDATION_MODES else 0
         self._build_ui()
         self.refresh()
 

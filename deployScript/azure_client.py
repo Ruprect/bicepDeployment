@@ -33,6 +33,14 @@ class AzureResourceGroup:
     provisioning_state: str
 
 
+@dataclass
+class AzureResource:
+    resource_id: str    # full ARM resource ID (/subscriptions/.../resourceGroups/...)
+    name: str
+    resource_type: str  # e.g. "Microsoft.Storage/storageAccounts"
+    location: str
+
+
 class AzureClient:
     def __init__(self, config_manager=None):
         self.current_tenant = None
@@ -261,7 +269,7 @@ class AzureClient:
         """Invoke Azure CLI login process."""
         try:
             az_cmd = self._get_az_command()
-            cmd = [az_cmd, 'login']
+            cmd = [az_cmd, 'login', '--use-device-code']
             if tenant_id:
                 cmd.extend(['--tenant', tenant_id])
                 
@@ -454,3 +462,48 @@ class AzureClient:
                 
         except subprocess.SubprocessError as e:
             return False, f"Error during deployment: {e}"
+
+    def list_resource_group_resources(self, resource_group: str) -> List['AzureResource']:
+        """List all resources in a resource group."""
+        try:
+            az_cmd = self._get_az_command()
+            result = subprocess.run(
+                [az_cmd, 'resource', 'list', '--resource-group', resource_group, '--output', 'json'],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode != 0:
+                logger.log(f"Error listing resources: {result.stderr}", LogLevel.ERROR, Color.RED)
+                return []
+            items = json.loads(result.stdout)
+            return [
+                AzureResource(
+                    resource_id=item['id'],
+                    name=item['name'],
+                    resource_type=item['type'],
+                    location=item.get('location', 'unknown')
+                )
+                for item in items
+            ]
+        except (subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
+            logger.log(f"Error listing resources: {e}", LogLevel.ERROR, Color.RED)
+            return []
+
+    def get_resource_arm_json(self, resource_id: str) -> Optional[dict]:
+        """Get the full ARM JSON for a specific resource by its resource ID."""
+        try:
+            az_cmd = self._get_az_command()
+            result = subprocess.run(
+                [az_cmd, 'resource', 'show', '--ids', resource_id, '--output', 'json'],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode != 0:
+                logger.log(f"Error fetching resource: {result.stderr}", LogLevel.ERROR, Color.RED)
+                return None
+            return json.loads(result.stdout)
+        except (subprocess.SubprocessError, json.JSONDecodeError) as e:
+            logger.log(f"Error fetching resource ARM JSON: {e}", LogLevel.ERROR, Color.RED)
+            return None

@@ -44,6 +44,7 @@ logs/
 .deployment-settings.json
 parameters.*.json
 !parameters.example.json
+!parameters.template.json
 
 # Azure CLI
 .azure/
@@ -66,3 +67,4 @@ CLAUDE.md
 
 # Not ready for commit
 vscode-extension
+.superpowers/

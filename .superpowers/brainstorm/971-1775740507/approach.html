@@ -1,0 +1,40 @@
+<h2>Which implementation approach?</h2>
+<p class="subtitle">There's already a <code>WPF/</code> folder with PowerShell+XAML files started. Which direction do you want to go?</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Continue &amp; complete the PowerShell + XAML approach</h3>
+      <p>Build on the existing <code>WPF/*.ps1</code> files. Runs by double-clicking a <code>.ps1</code> file — no compilation, no install. Uses PowerShell's built-in WPF hosting to load XAML windows. The existing files already have the dark theme and main window layout.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Already partially built</li><li>Zero install — ships as scripts</li><li>Easy to edit &amp; iterate</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>PowerShell WPF has limits (no MVVM, no data binding)</li><li>Can feel clunky for complex interactions</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Build a proper C# WPF application</h3>
+      <p>A real .NET WPF project (<code>.csproj</code>) that calls the Azure CLI via <code>Process</code>. Produces an <code>.exe</code>. Full MVVM, data binding, async operations, and a polished native Windows app feel. The Python logic gets re-implemented in C#.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Full WPF power (MVVM, async, data binding)</li><li>Ships as a standalone <code>.exe</code></li><li>Best long-term maintainability</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>More initial build work</li><li>Requires .NET SDK to build</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Python GUI (keep Python, add a window)</h3>
+      <p>Add a GUI layer on top of the existing Python codebase using <strong>tkinter</strong> (built-in) or <strong>PySimpleGUI / CustomTkinter</strong>. Keeps all the existing Python logic. Runs via <code>python deploy_gui.py</code>.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Reuses all existing Python code</li><li>No rewriting logic</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Python GUIs can look dated</li><li>Still requires Python installed</li><li>Not a "true" WPF</li></ul></div>
+      </div>
+    </div>
+  </div>
+</div>

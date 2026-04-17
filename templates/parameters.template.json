@@ -1,0 +1,65 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environment": {
+      "value": "<PLACEHOLDER>"
+    },
+    "projectSuffix": {
+      "value": "<PLACEHOLDER>"
+    },
+    "logicAppState": {
+      "value": "Disabled"
+    },
+    "workflowNames": {
+      "value": {
+        "helperGetErrorMessage": "<PLACEHOLDER>",
+        "helperSendNotification": "<PLACEHOLDER>",
+        "helperThrowError": "<PLACEHOLDER>",
+        "bcDataHandler": "<PLACEHOLDER>",
+        "bcCustomers": "<PLACEHOLDER>"
+      }
+    },
+    "systemReferences": {
+      "value": {}
+    },
+    "dataverse": {
+      "value": {
+        "clientSecret": "<PLACEHOLDER>",
+        "uri": "<PLACEHOLDER>",
+        "clientId": "<PLACEHOLDER>",
+        "serviceAccountGuid": "<PLACEHOLDER>",
+        "crmAdminAppUserGuid": "<PLACEHOLDER>"
+      }
+    },
+    "businessCentral": {
+      "value": {
+        "environmentName": "<PLACEHOLDER>",
+        "countries": [
+          {
+            "name": "denmark",
+            "companyId": "<PLACEHOLDER>",
+            "serviceAccountGuid": "<PLACEHOLDER>",
+            "systemReferenceGuid": "<PLACEHOLDER>"
+          }
+        ],
+        "apiCategories": {}
+      }
+    },
+    "storageAccount": {
+      "value": {
+        "containerName": "<PLACEHOLDER>",
+        "connectionName": "azureblob",
+        "orderPlannerPath": "<PLACEHOLDER>"
+      }
+    },
+    "secretValues": {
+      "value": {
+        "bc-appreg-appsecret": "<PLACEHOLDER>",
+        "bc-appreg-client-id": "<PLACEHOLDER>",
+        "dataverse-appreg-appsecret": "<PLACEHOLDER>",
+        "dataverse-appreg-client-id": "<PLACEHOLDER>"
+      }
+    }
+  }
+}

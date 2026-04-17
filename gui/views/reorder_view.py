@@ -23,20 +23,26 @@ class _RowItemWidget(QWidget):
 
         self._checkbox = QCheckBox()
         self._checkbox.setChecked(template.enabled)
-        self._checkbox.stateChanged.connect(
-            lambda s: self.enabled_changed.emit(
-                template.name, s == Qt.CheckState.Checked.value
-            )
-        )
         row.addWidget(self._checkbox)
 
-        name_label = QLabel(template.file.name)
-        name_label.setStyleSheet(
+        self._name_label = QLabel(template.file.name)
+        self._name_label.setStyleSheet(
             f"color: {Color.TEXT};" if template.enabled else
             f"color: {Color.MUTED}; text-decoration: line-through;"
         )
-        row.addWidget(name_label)
+        row.addWidget(self._name_label)
         row.addStretch()
+
+        # Wire after both widgets exist so _update_label_style can reference _name_label
+        self._checkbox.stateChanged.connect(self._on_state_changed)
+
+    def _on_state_changed(self, state: int):
+        enabled = state == Qt.CheckState.Checked.value
+        self._name_label.setStyleSheet(
+            f"color: {Color.TEXT};" if enabled else
+            f"color: {Color.MUTED}; text-decoration: line-through;"
+        )
+        self.enabled_changed.emit(self.template.name, enabled)
 
 
 class ReorderView(QWidget):

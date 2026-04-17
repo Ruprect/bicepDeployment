@@ -205,3 +205,14 @@ class ConfigManager:
         settings = self.load_deployment_settings()
         settings.configuration['ValidationMode'] = validation_mode
         self.save_deployment_settings(settings)
+
+    def get_deployment_mode(self) -> str:
+        """Get the az deployment mode: 'Incremental' or 'Complete'."""
+        settings = self.load_deployment_settings()
+        return settings.configuration.get('DeploymentMode', 'Incremental')
+
+    def set_deployment_mode(self, mode: str) -> None:
+        """Persist the az deployment mode."""
+        settings = self.load_deployment_settings()
+        settings.configuration['DeploymentMode'] = mode
+        self.save_deployment_settings(settings)

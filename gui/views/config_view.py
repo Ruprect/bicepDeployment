@@ -75,7 +75,7 @@ class ConfigView(QWidget):
         )
         self._sub_combo.currentTextChanged.connect(self._on_subscription_changed)
         self._mode_combo.currentTextChanged.connect(
-            lambda t: self.config_manager.set_validation_mode(t) if t else None
+            lambda t: self.config_manager.set_deployment_mode(t) if t else None
         )
 
     def _combo_with_refresh(self, combo: QComboBox, refresh_fn) -> QWidget:

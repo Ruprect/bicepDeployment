@@ -82,7 +82,7 @@ class MainWindow(QMainWindow):
         rg = self.config_manager.get_resource_group() or ""
         params = self.config_manager.get_parameter_files()
         params_file = str(params[0].resolve()) if params else ""
-        mode = self.config_manager.get_validation_mode() or "Incremental"
+        mode = self.config_manager.get_deployment_mode()
 
         # Map template index back to row index (templates are a subset of all rows)
         all_templates = self.bicep_manager.get_bicep_files()

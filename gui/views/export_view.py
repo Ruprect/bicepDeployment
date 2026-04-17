@@ -187,7 +187,6 @@ class ExportView(QWidget):
         params_file = params_files[0] if params_files else None
 
         output_dir = self._output_dir / datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        output_dir.mkdir(parents=True, exist_ok=True)
 
         def do_export():
             return self.exporter.export_resources(
